@@ -1,0 +1,62 @@
+# Azure Container App configuration
+resourceGroupName: your-resource-group
+location: eastus
+
+containerApp:
+  name: multi-stage-thinking-chat
+  environment: production
+  ingress:
+    external: true
+    targetPort: 3001
+    allowInsecure: false
+  
+  containers:
+    - name: app
+      image: your-registry.azurecr.io/multi-stage-thinking-chat:latest
+      cpu: 1.0
+      memory: 2Gi
+      env:
+        - name: NODE_ENV
+          value: production
+        - name: PORT
+          value: "3001"
+        - name: AZURE_OPENAI_ENDPOINT
+          secretRef: azure-openai-endpoint
+        - name: AZURE_OPENAI_API_KEY
+          secretRef: azure-openai-api-key
+        - name: AZURE_OPENAI_API_VERSION
+          value: "2024-02-15-preview"
+        - name: AZURE_OPENAI_DEPLOYMENT_NAME
+          secretRef: azure-openai-deployment-name
+        - name: AZURE_SEARCH_ENDPOINT
+          secretRef: azure-search-endpoint
+        - name: AZURE_SEARCH_API_KEY
+          secretRef: azure-search-api-key
+        - name: AZURE_SEARCH_INDEX_NAME
+          secretRef: azure-search-index-name
+        - name: AZURE_STORAGE_CONNECTION_STRING
+          secretRef: azure-storage-connection-string
+        - name: AZURE_STORAGE_CONTAINER_NAME
+          secretRef: azure-storage-container-name
+        - name: TOC_DIR
+          value: /app/md_out_toc
+        - name: DOCUMENTS_JSON_PATH
+          value: /app/documents.json
+  
+  secrets:
+    - name: azure-openai-endpoint
+      value: https://your-openai-resource.openai.azure.com/
+    - name: azure-openai-api-key
+      value: your-api-key
+    - name: azure-openai-deployment-name
+      value: gpt-4
+    - name: azure-search-endpoint
+      value: https://your-search-service.search.windows.net
+    - name: azure-search-api-key
+      value: your-search-api-key
+    - name: azure-search-index-name
+      value: your-index-name
+    - name: azure-storage-connection-string
+      value: your-connection-string
+    - name: azure-storage-container-name
+      value: your-container-name

@@ -1,0 +1,17 @@
+﻿python : Filter expression: (search.ismatch('Connector List and Layout', 'TOC', 'simple', 'all')) and (documentNumber e
+q 'SEN06867-13')
+発生場所 行:1 文字:1
++ python .\azure_search_toc_filter.py --toc "Connector List and Layout" ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Filter expressi... 'SEN06867-13'):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Traceback (most recent call last):
+  File "C:\Users\KM78660\OneDrive - Komatsu Ltd\honsya\SATORI AI\Phase 6\2段思考\frontend_java\scripts\azure_search_toc_fi
+lter.py", line 195, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "C:\Users\KM78660\OneDrive - Komatsu Ltd\honsya\SATORI AI\Phase 6\2段思考\frontend_java\scripts\azure_search_toc_fi
+lter.py", line 190, in main
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+UnicodeEncodeError: 'cp932' codec can't encode character '\u2013' in position 3910: illegal multibyte sequence

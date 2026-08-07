@@ -1,0 +1,28 @@
+{
+  "name": "multi-stage-thinking-chat",
+  "version": "1.0.0",
+  "description": "Multi-stage thinking chat application with Azure integration",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": "cd backend && npm run dev",
+    "dev:frontend": "cd frontend && npm run dev",
+    "build": "npm run build:backend && npm run build:frontend",
+    "build:backend": "cd backend && npm run build",
+    "build:frontend": "cd frontend && npm run build",
+    "start": "cd backend && npm start",
+    "generate:prompt-docs": "cd backend && npm run generate:prompt-docs",
+    "watch:prompt-docs": "cd backend && npx tsx ../scripts/generate-prompt-docs.ts --watch"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "dependencies": {
+    "@azure/cosmos": "^4.10.0",
+    "remark-gfm": "^4.0.1"
+  }
+}
