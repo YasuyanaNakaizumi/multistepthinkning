@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Button } from './components/ui/button';
-import { ScrollArea } from './components/ui/scroll-area';
 import { ChatMessage } from './components/ChatMessage';
 import { ThinkingProcess } from './components/ThinkingProcess';
 import { fetchAzureAdUser, signOutAzureAd } from './lib/azureAd';
@@ -8,26 +7,26 @@ import {
   Send,
   Loader2,
   FileText,
-  PanelLeft,
-  PanelRight,
   Plus,
   Square,
   X,
   Check,
-  ExternalLink,
   Download,
   ZoomIn,
   ZoomOut,
   RotateCcw,
   Search,
   Settings2,
+  BookOpen,
+  ChevronRight,
+  ExternalLink,
 } from 'lucide-react';
 import { ChatMessage as ChatMessageType, ThinkingStep } from './types';
 import type { Document } from './types';
 
 const LANGUAGES = [
-  { value: 'English', label: 'English' },
   { value: 'Japanese', label: '日本語' },
+  { value: 'English', label: 'English' },
 ];
 
 type DocumentSearchResults = {
@@ -48,6 +47,39 @@ function getSourceLabel(key: string): string {
   return key === 'operation_and_maintenance_manual' ? 'Operation & Maintenance Manual' : 'Shop Manual';
 }
 
+function truncateText(value: string, maxLength: number): string {
+  const trimmed = value.trim();
+  if (trimmed.length <= maxLength) return trimmed;
+  return `${trimmed.slice(0, maxLength)}...`;
+}
+
+function formatSelectedDocument(label: string, doc: Document, maxTitleLength = 22): string {
+  const title = truncateText(doc.documentTitle || doc.documentNumber, maxTitleLength);
+  return `${label}: ${title} (${doc.documentNumber})`;
+}
+
+function formatModelSerial(doc: Document, fallbackModel?: string, fallbackSerial?: string): string | undefined {
+  const associations = doc.modelSerialAssociation || [];
+  if (associations.length > 0) {
+    const parts = associations.slice(0, 2).map((item) => {
+      const serialRange = item.serial_start
+        ? `${item.serial_start}${item.serial_end ? `-${item.serial_end}` : ''}`
+        : item.serial;
+      return serialRange ? `${item.model}  S/N ${serialRange}` : item.model;
+    });
+    if (associations.length > 2) {
+      parts.push(`ほか${associations.length - 2}件`);
+    }
+    return parts.filter(Boolean).join(' / ');
+  }
+
+  const model = fallbackModel?.trim();
+  const serial = fallbackSerial?.trim();
+  if (!model && !serial) return undefined;
+  if (model && serial) return `${model}  S/N ${serial}`;
+  return model || `S/N ${serial}`;
+}
+
 function App() {
   const [messages, setMessages] = useState<ChatMessageType[]>([]);
   const [input, setInput] = useState('');
@@ -59,10 +91,11 @@ function App() {
   const [streamedContent, setStreamedContent] = useState('');
   const [currentThinkingSteps, setCurrentThinkingSteps] = useState<ThinkingStep[]>([]);
   const [selectedPdf, setSelectedPdf] = useState<{ url: string; title?: string } | null>(null);
-  const [showDocs, setShowDocs] = useState(true);
+  const [showDocSetup, setShowDocSetup] = useState(false);
+  const [hasSearched, setHasSearched] = useState(false);
   const [model, setModel] = useState('');
   const [serial, setSerial] = useState('');
-  const [language, setLanguage] = useState('English');
+  const [language, setLanguage] = useState('Japanese');
   const [isSearching, setIsSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<{ url: string; alt?: string } | null>(null);
@@ -139,6 +172,15 @@ function App() {
     }
   }, [messages, streamedContent]);
 
+  useEffect(() => {
+    if (!showDocSetup) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowDocSetup(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [showDocSetup]);
+
   const handleScroll = useCallback(() => {
     if (!scrollRef.current) return;
     const el = scrollRef.current;
@@ -151,7 +193,6 @@ function App() {
     if (!isResizingPdf) return;
 
     const onMove = (e: PointerEvent) => {
-      // PDF panel is on the right; width is distance from cursor to right edge
       const next = Math.round(window.innerWidth - e.clientX);
       setPdfPanelWidth(Math.min(1100, Math.max(360, next)));
     };
@@ -175,7 +216,6 @@ function App() {
   const buildPdfViewerUrl = (url: string) => {
     if (!url) return url;
     const hash = 'navpanes=0&pagemode=none&view=FitH&zoom=80';
-    // Preserve any existing hash by replacing it with our viewer preferences.
     return url.split('#')[0] + '#' + hash;
   };
 
@@ -184,10 +224,9 @@ function App() {
     setStreamedContent('');
     setCurrentThinkingSteps([]);
     setSelectedPdf(null);
+    setInput('');
     setChatSessionId(crypto.randomUUID());
   };
-
-
 
   const handleAzureAdSignOut = useCallback(() => {
     signOutAzureAd();
@@ -204,9 +243,11 @@ function App() {
 
     setIsSearching(true);
     setSearchError(null);
+    setHasSearched(false);
     setDocuments({ shop_manual: [], operation_and_maintenance_manual: [] });
     setSelectedShopManual(null);
     setSelectedOperationManual(null);
+    setDocSearchQuery('');
     resetChat();
 
     try {
@@ -232,6 +273,7 @@ function App() {
           ? data.operation_and_maintenance_manual
           : [],
       });
+      setHasSearched(true);
     } catch (error) {
       console.error('Error searching documents:', error);
       setSearchError((error as Error).message);
@@ -301,7 +343,6 @@ function App() {
           try {
             readResult = await reader.read();
           } catch (e: any) {
-            // AbortController abort() may surface here depending on browser.
             if (e?.name === 'AbortError') {
               break;
             }
@@ -447,6 +488,36 @@ function App() {
     || thinkingSources[0]?.key
     || 'shop_manual';
 
+  const canChat = selectedDocuments.length > 0;
+  const isLanding = messages.length === 0 && !isLoading;
+  const selectedDocumentParts = [
+    model.trim() && `機種型式 ${model.trim()}`,
+    serial.trim() && `機番 ${serial.trim()}`,
+    selectedShopManual && formatSelectedDocument('ショップ', selectedShopManual),
+    selectedOperationManual && formatSelectedDocument('取説', selectedOperationManual),
+  ].filter((part): part is string => Boolean(part));
+  const selectedDocumentsTitle = [
+    model.trim() && `機種型式: ${model.trim()}`,
+    serial.trim() && `機番: ${serial.trim()}`,
+    selectedShopManual && `ショップ: ${selectedShopManual.documentTitle} (${selectedShopManual.documentNumber})`,
+    selectedOperationManual && `取説: ${selectedOperationManual.documentTitle} (${selectedOperationManual.documentNumber})`,
+  ].filter(Boolean).join('\n');
+
+  const composer = canChat ? (
+    <ChatComposer
+      textareaRef={textareaRef}
+      value={input}
+      onChange={setInput}
+      onKeyDown={handleKeyDown}
+      onSend={handleSend}
+      isLoading={isLoading}
+      placeholder="手順、エラーコード、コネクタについて質問できます…"
+      documentParts={selectedDocumentParts}
+      documentTitle={selectedDocumentsTitle}
+      onChangeDocuments={() => setShowDocSetup(true)}
+    />
+  ) : null;
+
   if (!isAzureAdReady) {
     return (
       <div className="flex h-screen items-center justify-center bg-neutral-50 px-4 text-neutral-500">
@@ -460,248 +531,153 @@ function App() {
 
   return (
     <div className="flex h-screen bg-neutral-50 text-neutral-900">
-      {showDocs && (
-        <aside className="w-80 shrink-0 border-r border-neutral-200 bg-white flex flex-col">
-          <div className="h-14 px-4 border-b border-neutral-200 flex items-center justify-between">
-            <div className="flex items-center gap-2 text-sm font-semibold">
-              <Settings2 className="h-4 w-4 text-neutral-500" />
-              Document Setup
-            </div>
-            <Button variant="ghost" size="icon" onClick={() => setShowDocs(false)} title="Hide">
-              <PanelLeft className="h-4 w-4" />
-            </Button>
-          </div>
-          <ScrollArea className="flex-1">
-            <div className="p-4 space-y-4">
-              <div className="space-y-3">
-                <div>
-                  <label className="block text-xs font-medium text-neutral-600 mb-1">Model</label>
-                  <input
-                    type="text"
-                    value={model}
-                    onChange={(e) => setModel(e.target.value)}
-                    placeholder="e.g. PC200-10M0"
-                    className="w-full px-3 py-1.5 text-sm border border-neutral-300 rounded-md focus:outline-none focus:border-neutral-500"
-                  />
+      <aside className="w-[220px] shrink-0 border-r border-neutral-200 bg-white flex flex-col">
+        <div className="p-2">
+          <button
+            type="button"
+            onClick={resetChat}
+            disabled={isLoading}
+            className="w-full flex items-center justify-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-sm font-medium text-neutral-800 transition hover:border-neutral-300 hover:bg-neutral-50 disabled:opacity-50"
+            title="新規チャット"
+          >
+            <Plus className="h-4 w-4" />
+            新規チャット
+          </button>
+        </div>
+        {isAzureAdEnabled && (
+          <div className="mt-auto p-2 border-t border-neutral-100">
+            {azureAdUserName ? (
+              <div className="px-1">
+                <div className="text-[11px] text-neutral-500 truncate" title={azureAdEmail}>
+                  {azureAdUserName || 'Signed in'}
                 </div>
-                <div>
-                  <label className="block text-xs font-medium text-neutral-600 mb-1">Serial</label>
-                  <input
-                    type="text"
-                    value={serial}
-                    onChange={(e) => setSerial(e.target.value)}
-                    placeholder="Optional"
-                    className="w-full px-3 py-1.5 text-sm border border-neutral-300 rounded-md focus:outline-none focus:border-neutral-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-neutral-600 mb-1">Language</label>
-                  <select
-                    value={language}
-                    onChange={(e) => setLanguage(e.target.value)}
-                    className="w-full px-3 py-1.5 text-sm border border-neutral-300 rounded-md focus:outline-none focus:border-neutral-500 bg-white"
-                  >
-                    {LANGUAGES.map((lang) => (
-                      <option key={lang.value} value={lang.value}>
-                        {lang.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <Button
-                  onClick={searchDocuments}
-                  disabled={!model.trim() || isSearching}
-                  className="w-full gap-1.5"
-                  size="sm"
+                <button
+                  type="button"
+                  onClick={handleAzureAdSignOut}
+                  className="mt-1 text-xs text-neutral-500 hover:text-neutral-800"
                 >
-                  {isSearching ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
-                  Search Documents
-                </Button>
+                  Sign out
+                </button>
+              </div>
+            ) : (
+              <div className="px-1 text-[11px] text-red-600">Not authenticated</div>
+            )}
+          </div>
+        )}
+      </aside>
+
+      <main className="flex-1 flex flex-col min-w-0 relative">
+        {isLanding ? (
+          <div className="flex-1 flex flex-col items-center justify-center px-4">
+            <div className="w-full max-w-2xl flex flex-col items-center">
+              <div className="text-center mb-8">
+                <h1 className="text-3xl font-semibold tracking-tight text-neutral-900">
+                  段階思考チャット
+                </h1>
+                <p className="mt-2 text-sm text-neutral-500 leading-relaxed">
+                  対象機種のマニュアルを選んで、手順・故障・エラーコードを質問できます
+                </p>
               </div>
 
-              {searchError && (
-                <div className="text-xs text-red-600 bg-red-50 border border-red-100 rounded-md p-2">
-                  {searchError}
-                </div>
+              {!canChat && (
+                <button
+                  type="button"
+                  onClick={() => setShowDocSetup(true)}
+                  className="inline-flex items-center justify-center gap-2 rounded-full bg-neutral-900 px-6 py-3 text-sm font-semibold text-white shadow-md transition hover:bg-neutral-800 hover:shadow-lg active:scale-[0.98]"
+                >
+                  <Settings2 className="h-4 w-4" />
+                  ドキュメント設定
+                  <ChevronRight className="h-4 w-4" />
+                </button>
               )}
 
-              {(documents.shop_manual.length > 0 || documents.operation_and_maintenance_manual.length > 0) && (
-                <div className="border-t border-neutral-200 pt-4 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <div className="text-xs font-semibold text-neutral-600 uppercase tracking-wide">Documents</div>
-                  </div>
-                  <div className="relative">
-                    <Search className="absolute left-2.5 top-2 h-4 w-4 text-neutral-400" />
-                    <input
-                      type="text"
-                      placeholder="Filter results..."
-                      value={docSearchQuery}
-                      onChange={(e) => setDocSearchQuery(e.target.value)}
-                      className="w-full pl-8 pr-3 py-1.5 text-sm border border-neutral-300 rounded-md focus:outline-none focus:border-neutral-500"
-                    />
-                  </div>
-                  <div className="space-y-3">
-                    <DocumentSection
-                      title="Shop Manual"
-                      count={sortedShopDocs.length}
-                      documents={sortedShopDocs}
-                      selectedDocument={selectedShopManual}
-                      onSelect={selectShopManual}
-                    />
-                    <DocumentSection
-                      title="Operation & Maintenance Manual"
-                      count={sortedOperationDocs.length}
-                      documents={sortedOperationDocs}
-                      selectedDocument={selectedOperationManual}
-                      onSelect={selectOperationManual}
-                    />
-                  </div>
+              {composer && (
+                <div className="mt-8 w-full">
+                  {composer}
+                  {isLoading && (
+                    <div className="mt-2 flex justify-center">
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => abortRef.current?.abort()}
+                        className="h-7 px-2 text-xs gap-1"
+                        title="生成を停止"
+                      >
+                        <Square className="h-3.5 w-3.5" />
+                        停止
+                      </Button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
-          </ScrollArea>
-        </aside>
-      )}
-
-      <main className="flex-1 flex flex-col min-w-0">
-        <header className="h-14 px-4 border-b border-neutral-200 bg-white flex items-center">
-          <div className="flex items-center gap-2 w-[220px]">
-            {!showDocs && (
-              <Button variant="ghost" size="icon" onClick={() => setShowDocs(true)} title="Documents">
-                <PanelLeft className="h-4 w-4" />
-              </Button>
-            )}
           </div>
-
-          <div className="flex-1 min-w-0 text-center px-4">
-            <div className="text-sm font-semibold truncate">
-              {selectedDocuments.length > 0 ? selectedDocuments.map((doc) => doc.documentNumber).join(' + ') : 'Multi-Stage Thinking Chat'}
-            </div>
-            <div className="text-xs text-neutral-500 truncate">
-              {selectedDocuments.length > 0
-                ? selectedDocuments.map((doc) => doc.documentTitle).join(' + ')
-                : 'Technical documentation assistant'}
-            </div>
-          </div>
-
-          <div className="flex items-center justify-end gap-2 w-[220px]">
-            {isAzureAdEnabled &&
-              (azureAdUserName ? (
-                <div className="flex items-center gap-2">
-                  <div className="text-[11px] text-neutral-500 max-w-[120px] truncate" title={azureAdEmail}>
-                    {azureAdUserName || 'Signed in'}
-                  </div>
-                  <Button variant="ghost" size="sm" onClick={handleAzureAdSignOut} className="gap-1.5">
-                    <X className="h-4 w-4" />
-                    Sign out
-                  </Button>
-                </div>
-              ) : (
-                <div className="text-[11px] text-red-600">Not authenticated</div>
-              ))}
-
-
-
-            {isLoading && (
-              <Button
-                variant="destructive"
-                size="sm"
-                onClick={() => abortRef.current?.abort()}
-                className="gap-1.5"
-                title="Stop generating"
-              >
-                <Square className="h-4 w-4" />
-                Stop
-              </Button>
-            )}
-
-            <Button variant="default" size="sm" disabled={isLoading} onClick={resetChat} className="gap-1.5" title="Start a new chat">
-              <Plus className="h-4 w-4" />
-              New Chat
-            </Button>
-
-            {!selectedPdf && (
-              <Button variant="ghost" size="icon" onClick={() => setSelectedPdf({ url: '', title: '' })} title="PDF panel" disabled>
-                <PanelRight className="h-4 w-4 opacity-40" />
-              </Button>
-            )}
-          </div>
-        </header>
-
-        <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto">
-          <div className="max-w-3xl mx-auto w-full px-4 py-6 space-y-6">
-            {messages.length === 0 && !isLoading && <EmptyState />}
-
-            {messages.map((message, index) => (
-              <ChatMessage
-                key={index}
-                message={message}
-                onOpenPdf={(url, title) => setSelectedPdf({ url, title })}
-                onOpenImage={(url, alt) => {
-                  setLightbox({ url, alt });
-                  setZoom(1);
-                }}
-              />
-            ))}
-
-            {isLoading && (
-              <div className="space-y-3">
-                <ThinkingProcess steps={currentThinkingSteps} live />
-                {streamedContent ? (
+        ) : (
+          <>
+            <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto">
+              <div className="max-w-3xl mx-auto w-full px-4 pt-4 pb-36 space-y-4">
+                {messages.map((message, index) => (
                   <ChatMessage
-                    message={{
-                      role: 'assistant',
-                      content: streamedContent,
-                      thinkingSteps: [],
-                      thinkingSources,
-                      activeThinkingSourceKey: activeThinkingSource,
-                    }}
+                    key={index}
+                    message={message}
                     onOpenPdf={(url, title) => setSelectedPdf({ url, title })}
                     onOpenImage={(url, alt) => {
                       setLightbox({ url, alt });
                       setZoom(1);
                     }}
                   />
-                ) : (
-                  <div className="flex items-center gap-2 text-neutral-500 text-sm pl-1">
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    <span>Working on your answer…</span>
+                ))}
+
+                {isLoading && (
+                  <div className="space-y-3">
+                    <ThinkingProcess steps={currentThinkingSteps} live />
+                    {streamedContent ? (
+                      <ChatMessage
+                        message={{
+                          role: 'assistant',
+                          content: streamedContent,
+                          thinkingSteps: [],
+                          thinkingSources,
+                          activeThinkingSourceKey: activeThinkingSource,
+                        }}
+                        onOpenPdf={(url, title) => setSelectedPdf({ url, title })}
+                        onOpenImage={(url, alt) => {
+                          setLightbox({ url, alt });
+                          setZoom(1);
+                        }}
+                      />
+                    ) : (
+                      <div className="flex items-center gap-2 text-neutral-500 text-sm pl-1">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        <span>回答を作成しています…</span>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
-            )}
-          </div>
-        </div>
-
-        <div className="border-t border-neutral-200 bg-white">
-          <div className="max-w-3xl mx-auto w-full p-4">
-            <div className="flex items-end gap-2 border border-neutral-300 rounded-2xl px-3 py-2 bg-white focus-within:border-neutral-500 transition-colors">
-              <textarea
-                ref={textareaRef}
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder={
-                  selectedDocuments.length > 0
-                    ? 'Ask about procedures, error codes, connectors…'
-                    : 'Select a shop manual or operation manual on the left to start chatting'
-                }
-                disabled={isLoading || selectedDocuments.length === 0}
-                rows={1}
-                className="flex-1 resize-none outline-none text-sm leading-6 max-h-40 bg-transparent py-1"
-              />
-              <Button
-                onClick={handleSend}
-                disabled={isLoading || !input.trim() || selectedDocuments.length === 0}
-                size="icon"
-                className="h-8 w-8 rounded-full"
-              >
-                {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-              </Button>
             </div>
-            <div className="mt-2 text-[11px] text-neutral-400 text-center">Enter to send · Shift+Enter for newline</div>
-          </div>
-        </div>
+
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-neutral-50 via-neutral-50/95 to-transparent pt-10 pb-4 px-4">
+              <div className="pointer-events-auto max-w-3xl mx-auto">
+                {isLoading && (
+                  <div className="mb-2 flex justify-center">
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      onClick={() => abortRef.current?.abort()}
+                      className="h-7 px-2 text-xs gap-1"
+                      title="生成を停止"
+                    >
+                      <Square className="h-3.5 w-3.5" />
+                      停止
+                    </Button>
+                  </div>
+                )}
+                {composer}
+              </div>
+            </div>
+          </>
+        )}
       </main>
 
       {selectedPdf && selectedPdf.url && (
@@ -721,28 +697,50 @@ function App() {
             title="Drag to resize"
           />
           <aside className="shrink-0 border-l border-neutral-200 bg-white flex flex-col" style={{ width: pdfPanelWidth }}>
-            <div className="h-14 px-3 border-b border-neutral-200 flex items-center gap-2">
+            <div className="h-10 px-3 border-b border-neutral-200 flex items-center gap-2">
               <FileText className="h-4 w-4 text-neutral-500" />
-              <div className="flex-1 min-w-0">
-                <div className="text-sm font-semibold truncate">{selectedPdf.title || 'PDF Viewer'}</div>
-                <div className="text-[11px] text-neutral-500 truncate">Right panel viewer</div>
-              </div>
+              <div className="flex-1 min-w-0 text-sm font-semibold truncate">{selectedPdf.title || 'PDF Viewer'}</div>
               <a
                 href={selectedPdf.url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center justify-center h-9 w-9 rounded-md hover:bg-neutral-100"
+                className="inline-flex items-center justify-center h-7 w-7 rounded-md hover:bg-neutral-100"
                 title="Open in new tab"
               >
-                <ExternalLink className="h-4 w-4" />
+                <ExternalLink className="h-3.5 w-3.5" />
               </a>
-              <Button variant="ghost" size="icon" onClick={() => setSelectedPdf(null)} title="Close">
-                <X className="h-4 w-4" />
+              <Button variant="ghost" size="icon" onClick={() => setSelectedPdf(null)} title="Close" className="h-7 w-7">
+                <X className="h-3.5 w-3.5" />
               </Button>
             </div>
             <iframe title="pdf" src={buildPdfViewerUrl(selectedPdf.url)} className="flex-1 w-full h-full" />
           </aside>
         </>
+      )}
+
+      {showDocSetup && (
+        <DocumentSetupModal
+          model={model}
+          serial={serial}
+          language={language}
+          isSearching={isSearching}
+          searchError={searchError}
+          hasSearched={hasSearched}
+          docSearchQuery={docSearchQuery}
+          sortedShopDocs={sortedShopDocs}
+          sortedOperationDocs={sortedOperationDocs}
+          selectedShopManual={selectedShopManual}
+          selectedOperationManual={selectedOperationManual}
+          selectedCount={selectedDocuments.length}
+          onModelChange={setModel}
+          onSerialChange={setSerial}
+          onLanguageChange={setLanguage}
+          onDocSearchQueryChange={setDocSearchQuery}
+          onSearch={searchDocuments}
+          onSelectShopManual={selectShopManual}
+          onSelectOperationManual={selectOperationManual}
+          onClose={() => setShowDocSetup(false)}
+        />
       )}
 
       {lightbox && (
@@ -784,9 +782,291 @@ function App() {
   );
 }
 
+function SelectedDocumentsLine({
+  parts,
+  title,
+  disabled,
+  onChange,
+}: {
+  parts: string[];
+  title: string;
+  disabled?: boolean;
+  onChange: () => void;
+}) {
+  return (
+    <div className="flex items-center gap-2 min-w-0">
+      <div className="flex-1 min-w-0 flex items-center gap-1.5 text-[11px] text-neutral-500" title={title}>
+        <BookOpen className="h-3 w-3 shrink-0 text-neutral-400" />
+        {parts.map((part, index) => (
+          <span key={`${part}-${index}`} className="flex min-w-0 items-center gap-1.5">
+            {index > 0 && <span className="shrink-0 text-neutral-300">·</span>}
+            <span className="truncate">{part}</span>
+          </span>
+        ))}
+      </div>
+      <button
+        type="button"
+        onClick={onChange}
+        disabled={disabled}
+        className="shrink-0 inline-flex items-center gap-1 rounded-full border border-neutral-200 bg-white px-2 py-0.5 text-[11px] font-medium text-neutral-600 hover:border-neutral-300 hover:bg-neutral-50 disabled:opacity-50"
+      >
+        <Settings2 className="h-3 w-3" />
+        変更
+      </button>
+    </div>
+  );
+}
+
+function ChatComposer({
+  textareaRef,
+  value,
+  onChange,
+  onKeyDown,
+  onSend,
+  isLoading,
+  placeholder,
+  documentParts,
+  documentTitle,
+  onChangeDocuments,
+}: {
+  textareaRef: React.RefObject<HTMLTextAreaElement>;
+  value: string;
+  onChange: (value: string) => void;
+  onKeyDown: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
+  onSend: () => void;
+  isLoading: boolean;
+  placeholder: string;
+  documentParts: string[];
+  documentTitle: string;
+  onChangeDocuments: () => void;
+}) {
+  return (
+    <div className="border border-neutral-300 rounded-2xl bg-white shadow-sm px-3 pt-2.5 pb-2 transition-colors focus-within:border-neutral-500 focus-within:shadow-md">
+      <div className="flex items-start gap-2">
+        <textarea
+          ref={textareaRef}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder={placeholder}
+          title="Enterで送信 · Shift+Enterで改行"
+          disabled={isLoading}
+          rows={2}
+          className="flex-1 resize-none outline-none text-sm leading-6 min-h-[52px] max-h-40 bg-transparent py-0.5 disabled:text-neutral-400 disabled:cursor-not-allowed"
+        />
+        <Button
+          onClick={onSend}
+          disabled={isLoading || !value.trim()}
+          size="icon"
+          className="h-8 w-8 rounded-full shrink-0 mt-0.5"
+        >
+          {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+        </Button>
+      </div>
+      <div className="mt-2 pt-1.5 border-t border-neutral-100">
+        <SelectedDocumentsLine
+          parts={documentParts}
+          title={documentTitle}
+          disabled={isLoading}
+          onChange={onChangeDocuments}
+        />
+      </div>
+    </div>
+  );
+}
+
+function DocumentSetupModal({
+  model,
+  serial,
+  language,
+  isSearching,
+  searchError,
+  hasSearched,
+  docSearchQuery,
+  sortedShopDocs,
+  sortedOperationDocs,
+  selectedShopManual,
+  selectedOperationManual,
+  selectedCount,
+  onModelChange,
+  onSerialChange,
+  onLanguageChange,
+  onDocSearchQueryChange,
+  onSearch,
+  onSelectShopManual,
+  onSelectOperationManual,
+  onClose,
+}: {
+  model: string;
+  serial: string;
+  language: string;
+  isSearching: boolean;
+  searchError: string | null;
+  hasSearched: boolean;
+  docSearchQuery: string;
+  sortedShopDocs: Document[];
+  sortedOperationDocs: Document[];
+  selectedShopManual: Document | null;
+  selectedOperationManual: Document | null;
+  selectedCount: number;
+  onModelChange: (value: string) => void;
+  onSerialChange: (value: string) => void;
+  onLanguageChange: (value: string) => void;
+  onDocSearchQueryChange: (value: string) => void;
+  onSearch: () => void;
+  onSelectShopManual: (doc: Document) => void;
+  onSelectOperationManual: (doc: Document) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-neutral-900/40 backdrop-blur-[2px]" onClick={onClose} />
+      <div
+        className="relative w-full max-w-3xl max-h-[88vh] bg-white rounded-2xl shadow-2xl flex flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-labelledby="doc-setup-title"
+      >
+        <div className="px-6 py-4 border-b border-neutral-200 flex items-start justify-between gap-3">
+          <div>
+            <h2 id="doc-setup-title" className="text-lg font-semibold tracking-tight">
+              ドキュメント設定
+            </h2>
+            <p className="text-sm text-neutral-500 mt-0.5">
+              機種型式・機番・言語を指定して検索し、各マニュアルから1冊ずつ選択します。
+            </p>
+          </div>
+          <Button variant="ghost" size="icon" onClick={onClose} title="閉じる">
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+
+        <div className="px-6 py-5 border-b border-neutral-100">
+          <div className="flex items-end gap-2">
+            <div className="min-w-0 flex-[1.4]">
+              <label className="block text-xs font-medium text-neutral-600 mb-1">
+                機種型式 <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={model}
+                onChange={(e) => onModelChange(e.target.value)}
+                placeholder="例: PC200-10M0"
+                className="w-full px-3 py-2 text-sm border border-neutral-300 rounded-lg focus:outline-none focus:border-neutral-500"
+              />
+            </div>
+            <div className="min-w-0 flex-1">
+              <label className="block text-xs font-medium text-neutral-600 mb-1">機番</label>
+              <input
+                type="text"
+                value={serial}
+                onChange={(e) => onSerialChange(e.target.value)}
+                placeholder="任意"
+                className="w-full px-3 py-2 text-sm border border-neutral-300 rounded-lg focus:outline-none focus:border-neutral-500"
+              />
+            </div>
+            <div className="w-[148px] shrink-0">
+              <label className="block text-xs font-medium text-neutral-600 mb-1">ドキュメント言語</label>
+              <select
+                value={language}
+                onChange={(e) => onLanguageChange(e.target.value)}
+                className="w-full px-3 py-2 text-sm border border-neutral-300 rounded-lg focus:outline-none focus:border-neutral-500 bg-white"
+              >
+                {LANGUAGES.map((lang) => (
+                  <option key={lang.value} value={lang.value}>
+                    {lang.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <Button
+              onClick={onSearch}
+              disabled={!model.trim() || isSearching}
+              className="shrink-0 gap-1.5"
+            >
+              {isSearching ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+              検索
+            </Button>
+          </div>
+          {searchError && (
+            <div className="mt-3 text-xs text-red-600 bg-red-50 border border-red-100 rounded-lg p-2">
+              {searchError}
+            </div>
+          )}
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-6 py-5 min-h-[220px]">
+          {!hasSearched ? (
+            <div className="h-full min-h-[180px] flex flex-col items-center justify-center text-center text-neutral-500">
+              <Search className="h-8 w-8 text-neutral-300 mb-3" />
+              <div className="text-sm font-medium text-neutral-600">検索すると、ここにドキュメント一覧が表示されます</div>
+              <div className="text-xs mt-1">Shop Manual と Operation & Maintenance Manual からそれぞれ1冊選択できます</div>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-xs font-semibold text-neutral-500 uppercase tracking-wide">ドキュメント一覧</div>
+                <div className="relative w-56">
+                  <Search className="absolute left-2.5 top-2 h-4 w-4 text-neutral-400" />
+                  <input
+                    type="text"
+                    placeholder="結果を絞り込み…"
+                    value={docSearchQuery}
+                    onChange={(e) => onDocSearchQueryChange(e.target.value)}
+                    className="w-full pl-8 pr-3 py-1.5 text-sm border border-neutral-300 rounded-lg focus:outline-none focus:border-neutral-500"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 md:divide-x md:divide-neutral-200">
+                <div className="md:pr-5">
+                  <DocumentSection
+                    title="Shop Manual"
+                    count={sortedShopDocs.length}
+                    documents={sortedShopDocs}
+                    selectedDocument={selectedShopManual}
+                    fallbackModel={model}
+                    fallbackSerial={serial}
+                    onSelect={onSelectShopManual}
+                  />
+                </div>
+                <div className="md:pl-5">
+                  <DocumentSection
+                    title="Operation & Maintenance Manual"
+                    count={sortedOperationDocs.length}
+                    documents={sortedOperationDocs}
+                    selectedDocument={selectedOperationManual}
+                    fallbackModel={model}
+                    fallbackSerial={serial}
+                    onSelect={onSelectOperationManual}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="px-6 py-4 border-t border-neutral-200 bg-neutral-50 flex items-center justify-between gap-3">
+          <div className="text-xs text-neutral-500">
+            {selectedCount > 0 ? `${selectedCount}冊を選択中` : '各カテゴリから1冊ずつ選択できます'}
+          </div>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" onClick={onClose}>
+              キャンセル
+            </Button>
+            <Button onClick={onClose} disabled={selectedCount === 0}>
+              完了
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DocRow({
   label,
   sub,
+  detail,
   meta,
   downloadUrl,
   active,
@@ -794,6 +1074,7 @@ function DocRow({
 }: {
   label: string;
   sub?: string;
+  detail?: string;
   meta?: string;
   downloadUrl?: string;
   active: boolean;
@@ -813,17 +1094,19 @@ function DocRow({
           <span className="flex items-center gap-1.5">
             <span className="block font-medium truncate">{label}</span>
             {meta && (
-              <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${active ? 'bg-neutral-700 text-neutral-200' : 'bg-neutral-100 text-neutral-500'}`}>
+              <span className={`text-[10px] px-1.5 py-0.5 rounded-full shrink-0 ${active ? 'bg-neutral-700 text-neutral-200' : 'bg-neutral-100 text-neutral-500'}`}>
                 {meta}
               </span>
             )}
           </span>
           {sub && (
-            <span
-              className={`block text-[11px] ${active ? 'text-neutral-300' : 'text-neutral-500'}`}
-              style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
-            >
+            <span className={`block text-[11px] truncate ${active ? 'text-neutral-300' : 'text-neutral-500'}`}>
               {sub}
+            </span>
+          )}
+          {detail && (
+            <span className={`block text-[11px] truncate ${active ? 'text-neutral-400' : 'text-neutral-400'}`}>
+              {detail}
             </span>
           )}
         </span>
@@ -850,29 +1133,36 @@ function DocumentSection({
   count,
   documents,
   selectedDocument,
+  fallbackModel,
+  fallbackSerial,
   onSelect,
 }: {
   title: string;
   count: number;
   documents: Document[];
   selectedDocument: Document | null;
+  fallbackModel?: string;
+  fallbackSerial?: string;
   onSelect: (doc: Document) => void;
 }) {
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
         <div className="text-sm font-semibold text-neutral-700">{title}</div>
-        <div className="text-[11px] text-neutral-500">{count} results</div>
+        <div className="text-[11px] text-neutral-500">{count}件</div>
       </div>
       {documents.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-neutral-200 px-3 py-4 text-xs text-neutral-500">No matching documents.</div>
+        <div className="rounded-lg border border-dashed border-neutral-200 px-3 py-4 text-xs text-neutral-500">
+          該当するドキュメントはありません。
+        </div>
       ) : (
         <div className="space-y-1">
           {documents.map((doc) => (
             <DocRow
               key={`${title}-${doc.documentNumber}`}
-              label={doc.documentNumber}
-              sub={doc.documentTitle}
+              label={doc.documentTitle}
+              sub={doc.documentNumber}
+              detail={formatModelSerial(doc, fallbackModel, fallbackSerial)}
               meta={doc.language}
               downloadUrl={doc.documentUrl}
               active={selectedDocument?.documentNumber === doc.documentNumber}
@@ -881,19 +1171,6 @@ function DocumentSection({
           ))}
         </div>
       )}
-    </div>
-  );
-}
-function EmptyState() {
-  return (
-    <div className="py-16 text-center">
-      <div className="inline-flex items-center justify-center h-12 w-12 rounded-full bg-neutral-900 text-white mb-4">
-        <FileText className="h-6 w-6" />
-      </div>
-      <div className="text-lg font-semibold">Ask about the manual</div>
-      <div className="text-sm text-neutral-500 mt-1">
-        Search for a model and select a manual on the left, then ask a question.
-      </div>
     </div>
   );
 }
