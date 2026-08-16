@@ -20,6 +20,7 @@ import {
   BookOpen,
   ChevronRight,
   ExternalLink,
+  Image as ImageIcon,
 } from 'lucide-react';
 import { ChatMessage as ChatMessageType, ThinkingStep } from './types';
 import type { Document } from './types';
@@ -33,6 +34,8 @@ type DocumentSearchResults = {
   shop_manual: Document[];
   operation_and_maintenance_manual: Document[];
 };
+
+type PreviewPanel = { kind: 'pdf' | 'image'; url: string; title?: string };
 
 function normalizeSourceKey(value: string | undefined): string {
   return (value || '').toLowerCase().replace(/[\s_-]/g, '');
@@ -90,7 +93,7 @@ function App() {
   const [docSearchQuery, setDocSearchQuery] = useState('');
   const [streamedContent, setStreamedContent] = useState('');
   const [currentThinkingSteps, setCurrentThinkingSteps] = useState<ThinkingStep[]>([]);
-  const [selectedPdf, setSelectedPdf] = useState<{ url: string; title?: string } | null>(null);
+  const [preview, setPreview] = useState<PreviewPanel | null>(null);
   const [showDocSetup, setShowDocSetup] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [model, setModel] = useState('');
@@ -98,7 +101,6 @@ function App() {
   const [language, setLanguage] = useState('Japanese');
   const [isSearching, setIsSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
-  const [lightbox, setLightbox] = useState<{ url: string; alt?: string } | null>(null);
   const [zoom, setZoom] = useState(1);
   const [pdfPanelWidth, setPdfPanelWidth] = useState(576);
   const [isResizingPdf, setIsResizingPdf] = useState(false);
@@ -219,11 +221,20 @@ function App() {
     return url.split('#')[0] + '#' + hash;
   };
 
+  const openPreview = (kind: 'pdf' | 'image', url: string, title?: string) => {
+    setPreview({ kind, url, title });
+    if (kind === 'image') setZoom(1);
+  };
+
+  const openPreviewInNewWindow = (url: string) => {
+    window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
   const resetChat = () => {
     setMessages([]);
     setStreamedContent('');
     setCurrentThinkingSteps([]);
-    setSelectedPdf(null);
+    setPreview(null);
     setInput('');
     setChatSessionId(crypto.randomUUID());
   };
@@ -572,7 +583,7 @@ function App() {
             <div className="w-full max-w-2xl flex flex-col items-center">
               <div className="text-center mb-8">
                 <h1 className="text-3xl font-semibold tracking-tight text-neutral-900">
-                  段階思考チャット
+                  改善版AI bot試作版
                 </h1>
                 <p className="mt-2 text-sm text-neutral-500 leading-relaxed">
                   対象機種のマニュアルを選んで、手順・故障・エラーコードを質問できます
@@ -620,11 +631,8 @@ function App() {
                   <ChatMessage
                     key={index}
                     message={message}
-                    onOpenPdf={(url, title) => setSelectedPdf({ url, title })}
-                    onOpenImage={(url, alt) => {
-                      setLightbox({ url, alt });
-                      setZoom(1);
-                    }}
+                    onOpenPdf={(url, title) => openPreview('pdf', url, title)}
+                    onOpenImage={(url, alt) => openPreview('image', url, alt)}
                   />
                 ))}
 
@@ -640,11 +648,8 @@ function App() {
                           thinkingSources,
                           activeThinkingSourceKey: activeThinkingSource,
                         }}
-                        onOpenPdf={(url, title) => setSelectedPdf({ url, title })}
-                        onOpenImage={(url, alt) => {
-                          setLightbox({ url, alt });
-                          setZoom(1);
-                        }}
+                        onOpenPdf={(url, title) => openPreview('pdf', url, title)}
+                        onOpenImage={(url, alt) => openPreview('image', url, alt)}
                       />
                     ) : (
                       <div className="flex items-center gap-2 text-neutral-500 text-sm pl-1">
@@ -680,7 +685,7 @@ function App() {
         )}
       </main>
 
-      {selectedPdf && selectedPdf.url && (
+      {preview && preview.url && (
         <>
           <div
             className="w-1.5 cursor-col-resize bg-transparent hover:bg-neutral-200/70 active:bg-neutral-300/70"
@@ -697,23 +702,67 @@ function App() {
             title="Drag to resize"
           />
           <aside className="shrink-0 border-l border-neutral-200 bg-white flex flex-col" style={{ width: pdfPanelWidth }}>
-            <div className="h-10 px-3 border-b border-neutral-200 flex items-center gap-2">
-              <FileText className="h-4 w-4 text-neutral-500" />
-              <div className="flex-1 min-w-0 text-sm font-semibold truncate">{selectedPdf.title || 'PDF Viewer'}</div>
-              <a
-                href={selectedPdf.url}
-                target="_blank"
-                rel="noopener noreferrer"
+            <div className="h-10 px-3 border-b border-neutral-200 flex items-center gap-1.5">
+              {preview.kind === 'pdf' ? (
+                <FileText className="h-4 w-4 text-neutral-500 shrink-0" />
+              ) : (
+                <ImageIcon className="h-4 w-4 text-neutral-500 shrink-0" />
+              )}
+              <div className="flex-1 min-w-0 text-sm font-semibold truncate">
+                {preview.title || (preview.kind === 'pdf' ? 'PDF Viewer' : 'Image')}
+              </div>
+              {preview.kind === 'image' && (
+                <>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7"
+                    onClick={() => setZoom((z) => Math.max(0.25, Math.round((z - 0.25) * 100) / 100))}
+                    title="縮小"
+                  >
+                    <ZoomOut className="h-3.5 w-3.5" />
+                  </Button>
+                  <div className="text-[11px] text-neutral-500 w-10 text-center tabular-nums">{Math.round(zoom * 100)}%</div>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7"
+                    onClick={() => setZoom((z) => Math.min(5, Math.round((z + 0.25) * 100) / 100))}
+                    title="拡大"
+                  >
+                    <ZoomIn className="h-3.5 w-3.5" />
+                  </Button>
+                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setZoom(1)} title="リセット">
+                    <RotateCcw className="h-3.5 w-3.5" />
+                  </Button>
+                </>
+              )}
+              <button
+                type="button"
+                onClick={() => openPreviewInNewWindow(preview.url)}
                 className="inline-flex items-center justify-center h-7 w-7 rounded-md hover:bg-neutral-100"
-                title="Open in new tab"
+                title="別ウィンドウで開く"
               >
                 <ExternalLink className="h-3.5 w-3.5" />
-              </a>
-              <Button variant="ghost" size="icon" onClick={() => setSelectedPdf(null)} title="Close" className="h-7 w-7">
+              </button>
+              <Button variant="ghost" size="icon" onClick={() => setPreview(null)} title="Close" className="h-7 w-7">
                 <X className="h-3.5 w-3.5" />
               </Button>
             </div>
-            <iframe title="pdf" src={buildPdfViewerUrl(selectedPdf.url)} className="flex-1 w-full h-full" />
+            {preview.kind === 'pdf' ? (
+              <iframe title="pdf" src={buildPdfViewerUrl(preview.url)} className="flex-1 w-full h-full" />
+            ) : (
+              <div className="flex-1 bg-neutral-900 overflow-auto">
+                <div className="min-h-full min-w-full flex items-center justify-center p-4">
+                  <img
+                    src={preview.url}
+                    alt={preview.title || 'Image'}
+                    style={{ transform: `scale(${zoom})` }}
+                    className="origin-center select-none max-w-none"
+                  />
+                </div>
+              </div>
+            )}
           </aside>
         </>
       )}
@@ -741,42 +790,6 @@ function App() {
           onSelectOperationManual={selectOperationManual}
           onClose={() => setShowDocSetup(false)}
         />
-      )}
-
-      {lightbox && (
-        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center" onClick={() => setLightbox(null)}>
-          <div
-            className="bg-white rounded-xl shadow-2xl max-w-[90vw] max-h-[90vh] w-[1100px] flex flex-col overflow-hidden"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="h-12 px-3 border-b border-neutral-200 flex items-center gap-2">
-              <div className="flex-1 min-w-0 text-sm font-medium truncate">{lightbox.alt || 'Image'}</div>
-              <Button variant="ghost" size="icon" onClick={() => setZoom((z) => Math.max(0.25, Math.round((z - 0.25) * 100) / 100))}>
-                <ZoomOut className="h-4 w-4" />
-              </Button>
-              <div className="text-xs text-neutral-500 w-14 text-center tabular-nums">{Math.round(zoom * 100)}%</div>
-              <Button variant="ghost" size="icon" onClick={() => setZoom((z) => Math.min(5, Math.round((z + 0.25) * 100) / 100))}>
-                <ZoomIn className="h-4 w-4" />
-              </Button>
-              <Button variant="ghost" size="icon" onClick={() => setZoom(1)} title="Reset">
-                <RotateCcw className="h-4 w-4" />
-              </Button>
-              <Button variant="ghost" size="icon" onClick={() => setLightbox(null)} title="Close">
-                <X className="h-4 w-4" />
-              </Button>
-            </div>
-            <div className="flex-1 bg-neutral-900 overflow-auto">
-              <div className="min-h-full min-w-full flex items-center justify-center p-6">
-                <img
-                  src={lightbox.url}
-                  alt={lightbox.alt || 'Image'}
-                  style={{ transform: `scale(${zoom})` }}
-                  className="origin-center select-none max-w-none"
-                />
-              </div>
-            </div>
-          </div>
-        </div>
       )}
     </div>
   );
