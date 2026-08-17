@@ -1010,7 +1010,7 @@ function DocumentSetupModal({
     <div className="fixed inset-0 z-40 flex items-end sm:items-center justify-center p-0 sm:p-4">
       <div className="absolute inset-0 bg-neutral-900/40 backdrop-blur-[2px]" onClick={onClose} />
       <div
-        className="relative w-full sm:max-w-3xl h-[var(--app-height,100dvh)] sm:h-auto sm:max-h-[min(88vh,var(--app-height,88vh))] bg-white sm:rounded-2xl shadow-2xl flex flex-col overflow-hidden"
+        className="relative w-full sm:max-w-6xl h-[var(--app-height,100dvh)] sm:h-auto sm:max-h-[min(88vh,var(--app-height,88vh))] bg-white sm:rounded-2xl shadow-2xl flex flex-col overflow-hidden"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-labelledby="doc-setup-title"
@@ -1179,21 +1179,23 @@ function DocRow({
           <Check className="h-3 w-3" />
         </span>
         <span className="flex-1 min-w-0">
-          <span className="flex items-center gap-1.5">
-            <span className="block font-medium truncate">{label}</span>
+          <span className="flex items-start gap-1.5">
+            <span className="block font-medium line-clamp-2 break-words" title={label}>
+              {label}
+            </span>
             {meta && (
-              <span className={`text-[10px] px-1.5 py-0.5 rounded-full shrink-0 ${active ? 'bg-neutral-700 text-neutral-200' : 'bg-neutral-100 text-neutral-500'}`}>
+              <span className={`text-[10px] px-1.5 py-0.5 rounded-full shrink-0 mt-0.5 ${active ? 'bg-neutral-700 text-neutral-200' : 'bg-neutral-100 text-neutral-500'}`}>
                 {meta}
               </span>
             )}
           </span>
           {sub && (
-            <span className={`block text-[11px] truncate ${active ? 'text-neutral-300' : 'text-neutral-500'}`}>
+            <span className={`block text-[11px] truncate ${active ? 'text-neutral-300' : 'text-neutral-500'}`} title={sub}>
               {sub}
             </span>
           )}
           {detail && (
-            <span className={`block text-[11px] truncate ${active ? 'text-neutral-400' : 'text-neutral-400'}`}>
+            <span className={`block text-[11px] truncate ${active ? 'text-neutral-400' : 'text-neutral-400'}`} title={detail}>
               {detail}
             </span>
           )}
