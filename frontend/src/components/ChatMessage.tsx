@@ -38,12 +38,12 @@ export function ChatMessage({ message, onOpenPdf, onOpenImage }: ChatMessageProp
 
   if (isUser) {
     return (
-      <div className="flex justify-end">
-        <div className="max-w-[85%] flex gap-2 items-start">
-          <div className="rounded-2xl rounded-tr-sm bg-neutral-900 text-white px-4 py-2.5 text-sm whitespace-pre-wrap">
+      <div className="flex justify-end min-w-0">
+        <div className="max-w-[min(85%,100%)] flex gap-2 items-start min-w-0">
+          <div className="rounded-2xl rounded-tr-sm bg-neutral-900 text-white px-4 py-2.5 text-sm whitespace-pre-wrap break-words [overflow-wrap:anywhere] max-w-full">
             {message.content}
           </div>
-          <div className="h-7 w-7 rounded-full bg-neutral-200 text-neutral-600 flex items-center justify-center shrink-0">
+          <div className="hidden sm:flex h-7 w-7 rounded-full bg-neutral-200 text-neutral-600 items-center justify-center shrink-0">
             <User className="h-4 w-4" />
           </div>
         </div>
@@ -52,8 +52,8 @@ export function ChatMessage({ message, onOpenPdf, onOpenImage }: ChatMessageProp
   }
 
   return (
-    <div className="flex gap-3 items-start">
-      <div className="h-7 w-7 rounded-full bg-neutral-900 text-white flex items-center justify-center shrink-0">
+    <div className="flex gap-2 sm:gap-3 items-start min-w-0">
+      <div className="hidden sm:flex h-7 w-7 rounded-full bg-neutral-900 text-white items-center justify-center shrink-0">
         <Bot className="h-4 w-4" />
       </div>
       <div className="flex-1 min-w-0 space-y-3">
@@ -62,7 +62,7 @@ export function ChatMessage({ message, onOpenPdf, onOpenImage }: ChatMessageProp
         )}
 
         {message.content && (
-          <div className="text-[14px] leading-6 text-neutral-800
+          <div className="text-[14px] leading-6 text-neutral-800 break-words [overflow-wrap:anywhere]
             [&_h1]:text-xl [&_h1]:font-semibold [&_h1]:mt-4 [&_h1]:mb-2
             [&_h2]:text-lg [&_h2]:font-semibold [&_h2]:mt-4 [&_h2]:mb-2
             [&_h3]:text-base [&_h3]:font-semibold [&_h3]:mt-3 [&_h3]:mb-1.5
@@ -71,15 +71,19 @@ export function ChatMessage({ message, onOpenPdf, onOpenImage }: ChatMessageProp
             [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:my-2
             [&_li]:my-0.5
             [&_hr]:my-4
-            [&_code]:px-1 [&_code]:py-0.5 [&_code]:bg-neutral-100 [&_code]:rounded [&_code]:text-[13px]
-            [&_pre]:bg-neutral-900 [&_pre]:text-neutral-50 [&_pre]:p-3 [&_pre]:rounded-lg [&_pre]:overflow-x-auto
+            [&_code]:px-1 [&_code]:py-0.5 [&_code]:bg-neutral-100 [&_code]:rounded [&_code]:text-[13px] [&_code]:break-all
+            [&_pre]:bg-neutral-900 [&_pre]:text-neutral-50 [&_pre]:p-3 [&_pre]:rounded-lg [&_pre]:overflow-x-auto [&_pre]:max-w-full
             [&_blockquote]:border-l-4 [&_blockquote]:border-neutral-300 [&_blockquote]:pl-3 [&_blockquote]:text-neutral-600 [&_blockquote]:my-2
-            [&_table]:w-full [&_table]:border [&_table]:border-neutral-200 [&_table]:my-3 [&_table]:text-sm
             [&_th]:bg-neutral-100 [&_th]:border [&_th]:border-neutral-200 [&_th]:px-2 [&_th]:py-1 [&_th]:text-left
             [&_td]:border [&_td]:border-neutral-200 [&_td]:px-2 [&_td]:py-1 [&_td]:align-top">
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
               components={{
+                table: ({ node, ...props }) => (
+                  <div className="my-3 -mx-1 overflow-x-auto max-w-full">
+                    <table {...props} className="w-full min-w-[480px] border border-neutral-200 text-sm" />
+                  </div>
+                ),
                 a: ({ node, ...props }) => {
                   const href = typeof props.href === 'string' ? props.href : undefined;
                   const isPlaceholder =
@@ -152,7 +156,7 @@ export function ChatMessage({ message, onOpenPdf, onOpenImage }: ChatMessageProp
                 }}
                 target={onOpenPdf ? undefined : '_blank'}
                 rel={onOpenPdf ? undefined : 'noopener noreferrer'}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-neutral-200 bg-white text-xs text-neutral-700 hover:bg-neutral-50 max-w-xs"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-neutral-200 bg-white text-xs text-neutral-700 hover:bg-neutral-50 max-w-full"
                 title={pdf.title}
               >
                 <FileText className="h-3.5 w-3.5 text-neutral-500 shrink-0" />

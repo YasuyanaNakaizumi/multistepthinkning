@@ -1,0 +1,853 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Thinking フロー図 — 改善版AI bot試作版</title>
+  <style>
+    :root {
+      --ink: #111827;
+      --muted: #6b7280;
+      --line: #e5e7eb;
+      --gpt: #2563eb;
+      --search: #059669;
+      --logic: #4b5563;
+      --branch: #d97706;
+      --sys: #7c3aed;
+      --usr: #db2777;
+      --paper: #f7f6f3;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      font-family: ui-sans-serif, system-ui, "Segoe UI", "Hiragino Sans", sans-serif;
+      color: var(--ink);
+      background: var(--paper);
+    }
+    .shell { display: grid; grid-template-columns: 1fr min(420px, 36vw); height: 100dvh; height: 100svh; }
+    .left { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+    .toolbar {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      padding: 10px 14px; padding-top: max(10px, env(safe-area-inset-top));
+      border-bottom: 1px solid var(--line); background: #fff; z-index: 5;
+    }
+    .toolbar h1 { font-size: 15px; margin: 0; font-weight: 700; letter-spacing: -0.02em; flex: 1; min-width: 0; }
+    .toolbar .hint { margin: 0; font-size: 12px; color: var(--muted); width: 100%; line-height: 1.45; }
+    .toolbtn {
+      border: 1px solid var(--line); background: #fff; border-radius: 8px; height: 34px;
+      padding: 0 11px; cursor: pointer; font-size: 13px; color: var(--ink);
+    }
+    .toolbtn.active { background: #111827; color: #fff; border-color: #111827; }
+    .legend { display: flex; gap: 8px; flex-wrap: wrap; }
+    .dot { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
+    .dot i { width: 8px; height: 8px; border-radius: 99px; display: inline-block; }
+    .viewport {
+      flex: 1; overflow: hidden; position: relative; cursor: grab; min-height: 0;
+      background-image: radial-gradient(#d6d3cd 1px, transparent 1px);
+      background-size: 22px 22px;
+      touch-action: none;
+    }
+    .viewport.drag { cursor: grabbing; }
+    .board { position: absolute; transform-origin: 0 0; }
+    .wires { position: absolute; inset: 0; pointer-events: none; overflow: visible; }
+    .frame {
+      position: absolute; border: 1.5px dashed #d1d5db; border-radius: 18px;
+      background: rgba(255,255,255,.45); pointer-events: none;
+    }
+    .frame .ft {
+      position: absolute; top: -11px; left: 16px; background: var(--paper);
+      padding: 0 8px; font-size: 11px; font-weight: 700; color: #6b7280; letter-spacing: .04em;
+    }
+    .node {
+      position: absolute; background: #fff; border: 1.5px solid #d1d5db; border-radius: 14px;
+      padding: 10px 12px 10px 16px; cursor: pointer; box-shadow: 0 8px 24px rgba(17,24,39,0.06);
+      text-align: left; font: inherit; color: inherit;
+    }
+    .node:hover { border-color: #9ca3af; }
+    .node.active { border-color: #111827; box-shadow: 0 0 0 2px #111827; }
+    .node .bar { position: absolute; left: 0; top: 10px; bottom: 10px; width: 4px; border-radius: 0 3px 3px 0; }
+    .node.gpt .bar { background: var(--gpt); }
+    .node.search .bar { background: var(--search); }
+    .node.logic .bar { background: var(--logic); }
+    .kicker { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); display: flex; justify-content: space-between; gap: 8px; }
+    .chips { display: flex; gap: 4px; }
+    .chip { font-size: 9px; font-weight: 700; letter-spacing: .04em; border-radius: 999px; padding: 1px 6px; }
+    .chip.sys { background: #f3e8ff; color: var(--sys); }
+    .chip.usr { background: #fce7f3; color: var(--usr); }
+    .title { font-size: 13px; font-weight: 700; margin-top: 3px; line-height: 1.3; }
+    .sub { font-size: 11px; color: var(--muted); margin-top: 3px; line-height: 1.35; }
+    .diamond { position: absolute; width: 156px; height: 156px; cursor: pointer; background: transparent; border: 0; padding: 0; }
+    .diamond .shape {
+      position: absolute; inset: 28px; background: #fff; border: 1.5px solid var(--branch);
+      transform: rotate(45deg); border-radius: 12px; box-shadow: 0 8px 24px rgba(17,24,39,0.06);
+    }
+    .diamond.active .shape { box-shadow: 0 0 0 2px #111827; border-color: #111827; }
+    .diamond .lab {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      font-size: 12px; font-weight: 700; text-align: center; padding: 32px 18px; pointer-events: none; line-height: 1.3;
+    }
+    .elabel {
+      position: absolute; font-size: 11px; font-weight: 700; color: #b45309; background: #fffbeb;
+      border: 1px solid #fde68a; border-radius: 999px; padding: 2px 8px; pointer-events: none; white-space: nowrap;
+    }
+    .sidebar { background: #fff; border-left: 1px solid var(--line); display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+    .sidebar header { padding: 14px 16px; border-bottom: 1px solid var(--line); display: flex; gap: 8px; align-items: flex-start; }
+    .sidebar header h2 { margin: 0 0 4px; font-size: 15px; line-height: 1.3; }
+    .sidebar header p { margin: 0; font-size: 12px; color: var(--muted); word-break: break-word; }
+    .sidebar .body { flex: 1; overflow: auto; padding: 14px 16px 28px; -webkit-overflow-scrolling: touch; }
+    .empty { color: var(--muted); font-size: 13px; line-height: 1.6; }
+    .prompt h3 {
+      margin: 0 0 6px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+      display: flex; justify-content: space-between; align-items: center; gap: 8px;
+    }
+    .prompt h3.sys { color: var(--sys); }
+    .prompt h3.usr { color: var(--usr); }
+    .prompt pre {
+      margin: 0 0 16px; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+      font-size: 11.5px; line-height: 1.5; background: #f9fafb; border: 1px solid var(--line);
+      border-radius: 10px; padding: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .copy, .win, .x {
+      border: 1px solid var(--line); background: #fff; border-radius: 8px; cursor: pointer;
+      font-size: 12px; padding: 6px 8px; color: var(--ink);
+    }
+    .x { display: none; margin-left: auto; }
+    .backdrop { display: none; }
+    .note { font-size: 12px; color: var(--muted); line-height: 1.55; margin: 0 0 14px; }
+    .addon { border: 1px solid #fde68a; background: #fffbeb; border-radius: 10px; padding: 10px; margin: 0 0 12px; }
+    .addon h4 { margin: 0 0 6px; font-size: 12px; }
+    .list {
+      display: none; flex: 1; overflow: auto; padding: 16px 16px 40px;
+      padding-bottom: max(40px, env(safe-area-inset-bottom));
+    }
+    .list-card {
+      width: 100%; max-width: 560px; margin: 0 auto; background: #fff; border: 1.5px solid #d1d5db;
+      border-radius: 14px; padding: 12px 14px; text-align: left; font: inherit; color: inherit; cursor: pointer;
+      position: relative;
+    }
+    .list-card.active { border-color: #111827; box-shadow: 0 0 0 2px #111827; }
+    .list-card .bar { position: absolute; left: 0; top: 10px; bottom: 10px; width: 4px; border-radius: 0 3px 3px 0; }
+    .list-card.gpt .bar { background: var(--gpt); }
+    .list-card.search .bar { background: var(--search); }
+    .list-card.logic .bar, .list-card.branch .bar { background: var(--logic); }
+    .list-card.branch { border-color: #fde68a; background: #fffbeb; }
+    .v-arrow {
+      width: 2px; height: 22px; background: #9ca3af; margin: 0 auto; position: relative;
+    }
+    .v-arrow:after {
+      content: ""; position: absolute; left: -4px; bottom: -1px;
+      border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 7px solid #9ca3af;
+    }
+    .branch-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; max-width: 560px; margin: 0 auto; }
+    .branch-col { display: flex; flex-direction: column; align-items: stretch; min-width: 0; }
+    .blab { text-align: center; font-size: 11px; font-weight: 700; color: #b45309; margin: 4px 0; }
+    @media (max-width: 900px) {
+      .shell { grid-template-columns: 1fr; }
+      .sidebar {
+        position: fixed; left: 0; right: 0; bottom: 0; height: min(72dvh, 640px);
+        border-left: 0; border-top: 1px solid var(--line); border-radius: 16px 16px 0 0;
+        transform: translateY(110%); transition: transform .2s ease; z-index: 30;
+      }
+      .sidebar.open { transform: translateY(0); }
+      .x { display: block; }
+      .backdrop { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 20; }
+      .backdrop.show { display: block; }
+      .toolbar h1 { font-size: 14px; }
+    }
+    .list.show { display: block; }
+    .viewport.hide { display: none; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="left">
+      <div class="toolbar">
+        <h1>ユーザー質問後の Thinking フロー</h1>
+        <button class="toolbtn" id="view-board">ボード</button>
+        <button class="toolbtn" id="view-list">一覧</button>
+        <button class="toolbtn" id="zoom-out">−</button>
+        <button class="toolbtn" id="zoom-in">＋</button>
+        <button class="toolbtn" id="fit">全体表示</button>
+        <div class="legend">
+          <span class="dot"><i style="background:#2563eb"></i>GPT</span>
+          <span class="dot"><i style="background:#059669"></i>Search</span>
+          <span class="dot"><i style="background:#d97706"></i>分岐</span>
+          <span class="dot"><i style="background:#4b5563"></i>処理</span>
+          <span class="dot"><i style="background:#7c3aed"></i>System</span>
+          <span class="dot"><i style="background:#db2777"></i>User</span>
+        </div>
+        <p class="hint">ドラッグ / ピンチで移動・拡大。GPT ブロックをクリックすると、そのステップの System Prompt と User Prompt を表示します。{{変数}} は実行時に埋め込まれます。</p>
+      </div>
+      <div class="viewport" id="viewport"></div>
+      <div class="list" id="list"></div>
+    </div>
+    <aside class="sidebar" id="sidebar">
+      <header>
+        <div>
+          <h2 id="st">プロンプト</h2>
+          <p id="ss">ノードをクリックしてください</p>
+        </div>
+        <button class="win" id="win" hidden>別ウィンドウ</button>
+        <button class="x" id="close">×</button>
+      </header>
+      <div class="body" id="sb">
+        <div class="empty">GPT ノードを選ぶと、そのステップで実際に送っている System Prompt と User Prompt のテンプレートが出ます。</div>
+      </div>
+    </aside>
+  </div>
+  <div class="backdrop" id="backdrop"></div>
+
+  <script>
+    const P = {
+      queries: {
+        title: "1. 検索クエリ生成",
+        fn: "generateSearchQueries",
+        system: `Your goal is to generate effective search queries for a technical documentation search system.
+
+## What to Extract
+- error codes / fault codes (e.g., CA441)
+- part numbers, TSI, PSN, serial-like identifiers
+- component names, connector IDs (when explicitly mentioned)
+- maintenance-related terms and periodic inspection terms when the question is about operation and maintenance manuals
+
+## Conversation Context (IMPORTANT)
+- If chat history is provided, you MUST use it to resolve omitted context in the current user query.
+- Do NOT invent identifiers that do not appear in the user query or recent chat history.
+
+## Output
+- Output JSON format only: {"queries": ["query1", "query2"], "has_codes": true/false}
+- If no identifiers are found, return the original user query as a single query.`,
+        user: `User Query: {{userQuery}}
+
+Recent Chat History (most recent last):
+{{chatHistory.slice(-6) as "role: content"}}`
+      },
+      tocInitial: {
+        title: "2. 初期 TOC パス選定",
+        fn: "selectTOCChaptersInitial",
+        system: "Select the most relevant TOC path values for the user question. Prefer the deepest, most specific entries you can find.",
+        user: `Select a SMALL set of relevant TOC path values for the user question.
+
+## Rules
+1. Return the EXACT path strings as they appear in the TOC (one path per line).
+2. Prefer leaf-level / deepest / most specific paths over parent paths.
+3. Be as specific as possible and include low-level paths whenever they are relevant.
+4. Do NOT return titles. Return path values only.
+5. Be helpful but not exhaustive. This is the INITIAL path selection.
+6. Maintenance (OMM / 取扱説明書): If the query is about maintenance, メンテナンス, periodic maintenance, or 定期点検, and a Maintenance/Periodic Maintenance parent exists, also include its child maintenance item/detail paths, not just the schedule/interval parent.
+6. Return JSON only.
+
+## Output Format
+{ "chapters": ["XXXXXXXX", "XXXXXXXXX"] }
+
+## Search Queries
+{{JSON.stringify(queries)}}
+
+## User Query
+{{userQuery}}
+
+## Table of Contents
+{{tocContent}}`
+      },
+      judge: {
+        title: "4. 回答可能性の判定",
+        fn: "judgeAnswerability",
+        system: 'You are a document relevance judge. Determine if the provided document excerpts contain enough information to answer the user question. Output JSON format: {"answerable": true/false, "reason": "explanation"}',
+        user: `User Query: {{userQuery}}
+
+Queries: {{JSON.stringify(queries)}}
+
+Document Excerpts:
+{{searchResults.slice(0,10) as "Chapter N (TOC): content"}}`
+      },
+      extract: {
+        title: "5. 要素抽出",
+        fn: "extractElements",
+        system: `You are an expert in analyzing technical documents in Japanese and English. Based only on the user query and the provided Document Content, determine whether additional search is needed and extract the information required for that search.
+
+## Output Format
+{
+  "error_codes": [],
+  "connectors": [],
+  "reference_chapters": [],
+  "diagnostic_chapters": [],
+  "components": [],
+  "reasoning": "",
+  "needs_followup": false
+}
+
+## Extraction Rules
+* Focus only on the user query: "{{userQuery}}".
+* Do not invent information that is not explicitly stated in the Document Content.
+* If the provided content is TOC-like or chapter-list-like, prefer extracting chapter titles exactly as they appear instead of rewriting them.
+* error_codes: Extract explicit error or failure codes only when sufficient information about them has not already been found in the Document Content.
+* connectors: Extract explicit connector IDs ONLY when the user query is explicitly about connectors, wiring, error codes, diagnostics, or inspection.
+* reference_chapters: Extract chapter or section titles explicitly referenced by "see" / "refer to" / "〜を参照".
+* diagnostic_chapters: Extract chapter titles related to troubleshooting, diagnosis, or inspection.
+* components: Extract up to two primary components involved.
+* reasoning: Briefly explain what information is available and what is missing.
+
+## needs_followup Rules
+* If the user query is not related to troubleshooting, diagnosis, inspection, or a check procedure, set needs_followup to false.
+* If it is related, set needs_followup to true when the Document Content is insufficient OR any of error_codes / connectors / reference_chapters / diagnostic_chapters is extracted.
+
+Return JSON only.`,
+        user: `User Query: {{userQuery}}
+
+Chat History:
+{{chatHistory.slice(-4)}}
+
+Document Content / TOC:
+{{textContext}}`
+      },
+      multi: {
+        title: "6. 複数エラーコード検出",
+        fn: "detectMultiErrorCodes",
+        system: `You are an assistant that detects whether the user is asking about multiple error codes.
+
+Rules:
+1. Decide if the query is about diagnosing TWO OR MORE distinct error codes.
+2. Use only information present in the User Query, Recent Chat History, and Extracted Error Codes.
+3. Do NOT invent error codes.
+4. Normalize codes (trim spaces, keep original casing) and deduplicate.
+5. Return JSON only.
+
+Output JSON format:
+{
+  "is_multi_error_codes": true,
+  "error_codes": ["CA441", "CA442"],
+  "reason": "..."
+}`,
+        user: `User Query:
+{{userQuery}}
+
+Extracted Error Codes (from previous step):
+{{JSON.stringify(extractedErrorCodes)}}
+
+Recent Chat History (most recent last):
+{{chatHistory.slice(-6)}}`
+      },
+      tocFollow: {
+        title: "7a. 追加 TOC 選定",
+        fn: "selectTOCChapters",
+        system: "You are an expert at finding relevant TOC path values in technical manuals. Prefer the deepest, most specific paths.",
+        user: `Below is the Table of Contents of available manuals. Given the search queries, select the TOC path values that are most likely to contain the needed information.
+
+## Rules
+1. Return the EXACT path strings as they appear in the TOC.
+2. Select up to 30 most relevant paths.
+3. Prefer leaf-level / deepest / most specific paths.
+4. You MUST be exhaustive, not conservative.
+5. Do NOT return titles. Return path values only.
+6. Fault codes: For each error code, include ALL TOC paths that contain that error code.
+7. Connectors: include connector list/layout AND the full 3D layout series (1)(2)(3).
+8. Inspections: include pre-diagnostic inspection and electrical inspection when present.
+9. Components: include location / explanation paths.
+10. Maintenance: include child item/procedure paths, not only the schedule parent.
+10. Return JSON only.
+
+## Output Format
+{ "chapters": ["XXXXXXXXXXXXX", "XXXXXXXXXX"] }
+
+## Search Queries
+{{followupQueries from error_codes / connectors / reference_chapters / diagnostic_chapters / components}}
+
+## User Query
+{{userQuery}}
+
+## Table of Contents
+{{tocContent}}`
+      },
+      classify: {
+        title: "8. 章分類",
+        fn: "classifyChapters",
+        system: "You are an expert in classifying technical documents. Prefer IGNORE when a chapter is not clearly relevant to the user question.",
+        user: `Classify each chapter based on how useful it is for answering the user's question.
+
+User Question
+{{userQuery}}
+
+Chapter List
+{{JSON.stringify(chapterList, null, 2)}}
+
+Categories
+MAIN: direct answers, procedures, specifications, locations, or keywords.
+SUB: support / explicitly referenced by MAIN. Maximum 5.
+CONNECTOR: connector lists, tables, wiring/layout, location chapters. Only when connector relevance is explicit.
+IGNORE: unrelated or only loosely related.
+
+Rules
+- "how" / "where" / specification → MAIN
+- If multiple chapters contain the same information, the most detailed one is MAIN
+- Referenced chapters must be at least SUB
+- Use chapter content, image_captions, and image_ocr_texts
+- If none clearly match, put all into IGNORE
+- Every chapter index must appear in exactly one category
+
+Output JSON only:
+{ "main": [0, 1], "connector": [4], "sub": [2], "ignore": [3] }`
+      },
+      patterns: {
+        title: "9. 回答パターン分類",
+        fn: "classifyAnswerPatterns",
+        system: "You are an expert at classifying how a user wants the final answer to be structured. Return one or more answer patterns from this allowed list: single_fault, assembly, multi_fault, maintenance, general. Choose all patterns that apply. Return JSON only.",
+        user: `User Query: {{userQuery}}
+
+Recent Chat History:
+{{chatHistory.slice(-4)}}
+
+Extracted Elements:
+{{extractedElements JSON}}
+
+Multi Error Context:
+{{multiError JSON}}
+
+## Pattern Guidance
+- single_fault: one fault code or one troubleshooting target
+- assembly: disassembly / assembly / removal / installation
+- multi_fault: multiple error codes or shared inspection across faults
+- maintenance: periodic maintenance, inspection interval, service interval
+- general: specification, usage, explanation, location lookup
+
+## Output Format
+{ "patterns": ["single_fault", "assembly"], "reason": "short explanation" }`
+      },
+      language: {
+        title: "10. 回答言語判定",
+        fn: "classifyAnswerLanguage",
+        system: 'You are a strict language classifier. Determine the language that should be used to answer the user question. Return JSON only with language set to "ja" or "en" and a short reason. Choose the language of the user question itself, not the document language.',
+        user: `User Query:
+{{userQuery}}
+
+Recent Chat History:
+{{chatHistory.slice(-4)}}
+
+Output JSON only:
+{ "language": "ja" or "en", "reason": "short explanation" }`
+      },
+      final: {
+        title: "11. 最終回答生成",
+        fn: "buildFinalAnswerSystemPromptForRequest + streamFinalAnswer",
+        system: `You are an assistant supporting a mechanical engineer. Your task is to provide comprehensive and accurate answers by integrating the provided documents (text and images).
+
+Answer Creation Rules:
+0. Language (CRITICAL): Always write the entire answer in the same language as the user's question, regardless of the document language.
+1. Summary: Begin every answer with a 3-4 sentence summary.
+2. Completeness: Reproduce every procedure step, numeric value, pass/fail criterion, and explicit condition in the Context.
+3. Safety: Mark warnings (▼) and cautions (!).
+4. No Hallucination: Do not write facts that are not in the Context.
+5. No Chapter Mixing: Do not mix procedures from different chapters into one step.
+6. Structure: Natural headings matching the question and Context.
+7. Readability: Prefer headings, bullets, and Markdown tables.
+8. Citations: Copy PDF_CITATION_MARKDOWN byte-for-byte. No invented URLs.
+9. Cross-chapter References: Turn "〜を参照" / "see ..." into the matching Document Ref link.
+10. Images: insert [[IMG:<file name>]] on its own line. Backend replaces with SAS URLs. Never write raw image URLs.
+11. Required Tools: "## Required Tools" table when tools appear.
+
+Context:
+{{combinedContext}}`,
+        user: `{{userQuery}}
+
+messages = [
+  { role: "system", content: systemPrompt },
+  ...chatHistory.slice(-4),
+  { role: "user", content: userQuery }
+]
+stream: true`,
+        addons: [
+          { title: "Language Reinforcement（常時）", body: "ja: Keep all response text in Japanese.\nen: Keep all response text in English." },
+          { title: "ANSWER MODE - Single Fault（patterns に single_fault）", body: "Overview → Preconditions → Procedure → Decision/Diagnosis → Verification.\nReproduce the FULL sequence of steps, criteria, numeric values, and decision branches." },
+          { title: "ANSWER MODE - Assembly（patterns に assembly）", body: "Detailed step-by-step for removal / installation / assembly.\nPlace an image after each removal point, installation point, or critical sub-step." },
+          { title: "ANSWER MODE - Multiple Fault Codes（patterns に multi_fault または is_multi_error_codes）", body: "Common suspected components first, then each error code in its own ### {CODE} subsection.\nNever infer commonality across codes unless Context says it applies to ALL codes." },
+          { title: "ANSWER MODE - Periodic Maintenance（patterns に maintenance）", body: "Never answer with only a list of items. For each item give procedure, warnings, tools, and torque/clearance values." },
+          { title: "ANSWER MODE - Manual Integration（shop + OMM の両方があるとき）", body: "Synthesize one integrated answer instead of separate per-source sections." },
+          { title: "CONNECTOR SECTION（Context に EXTRACTED_CONNECTORS または (CONNECTOR) があるとき）", body: "## Related Connector Information を Required Tools の直前に必須出力。\n5列テーブル: Connector No. | Connector Type | Number of pins | Installation position | Address\n直後に [[IMG:...]] で立体配置図を挿入。" }
+        ]
+      }
+    };
+
+    const FRAMES = [
+      { x: 390, y: 24, w: 400, h: 450, title: "1. 検索準備" },
+      { x: 36, y: 500, w: 1110, h: 700, title: "2. 初期検索と判定" },
+      { x: 390, y: 1230, w: 400, h: 490, title: "3. 要素抽出" },
+      { x: 36, y: 1750, w: 340, h: 310, title: "分岐 · 追加検索" },
+      { x: 390, y: 2060, w: 400, h: 780, title: "4. 分類と最終回答" }
+    ];
+
+    const NODES = [
+      { id: "user", x: 465, y: 60, w: 250, h: 86, kind: "logic", kicker: "入力", title: "ユーザー質問", sub: "POST /api/chat/stream" },
+      { id: "queries", x: 465, y: 200, w: 250, h: 92, kind: "gpt", kicker: "Step 1 · GPT", title: "検索クエリ生成", sub: "generateSearchQueries", prompt: "queries" },
+      { id: "toc", x: 465, y: 346, w: 250, h: 92, kind: "gpt", kicker: "Step 2 · GPT", title: "初期 TOC パス選定", sub: "selectTOCChaptersInitial", prompt: "tocInitial" },
+      { id: "search", x: 465, y: 546, w: 250, h: 92, kind: "search", kicker: "Step 3 · Search", title: "パス完全一致検索", sub: "Azure AI Search · GPTなし" },
+      { id: "judge", x: 465, y: 690, w: 250, h: 92, kind: "gpt", kicker: "Step 4 · GPT", title: "回答可能性判定", sub: "judgeAnswerability", prompt: "judge" },
+      { id: "d1", x: 516, y: 830, w: 148, h: 148, kind: "branch", shape: "diamond", title: "answerable?" },
+      { id: "hybrid", x: 80, y: 1040, w: 250, h: 92, kind: "search", kicker: "分岐 · Search", title: "ハイブリッド検索", sub: "false のときのみ Embedding + 再検索" },
+      { id: "extract", x: 465, y: 1266, w: 250, h: 92, kind: "gpt", kicker: "Step 5a · GPT", title: "要素抽出", sub: "extractElements", prompt: "extract" },
+      { id: "multi", x: 465, y: 1410, w: 250, h: 92, kind: "gpt", kicker: "Step 5a2 · GPT", title: "複数エラーコード検出", sub: "detectMultiErrorCodes", prompt: "multi" },
+      { id: "d2", x: 516, y: 1548, w: 148, h: 148, kind: "branch", shape: "diamond", title: "needs_followup?" },
+      { id: "tocF", x: 80, y: 1790, w: 250, h: 92, kind: "gpt", kicker: "Step 5b · GPT", title: "追加 TOC 選定", sub: "selectTOCChapters", prompt: "tocFollow" },
+      { id: "searchF", x: 80, y: 1934, w: 250, h: 92, kind: "search", kicker: "Step 5b · Search", title: "追加パス検索", sub: "Azure AI Search · GPTなし" },
+      { id: "classify", x: 465, y: 2100, w: 250, h: 92, kind: "gpt", kicker: "Step 5c · GPT", title: "章分類 MAIN/SUB/CONNECTOR", sub: "classifyChapters", prompt: "classify" },
+      { id: "patterns", x: 465, y: 2244, w: 250, h: 92, kind: "gpt", kicker: "Step 6b · GPT", title: "回答パターン分類", sub: "classifyAnswerPatterns", prompt: "patterns" },
+      { id: "lang", x: 465, y: 2388, w: 250, h: 92, kind: "gpt", kicker: "Final 直前 · GPT", title: "回答言語判定", sub: "classifyAnswerLanguage", prompt: "language" },
+      { id: "ctx", x: 465, y: 2532, w: 250, h: 86, kind: "logic", kicker: "処理", title: "Context 組み立て", sub: "PDF SAS / 画像マップ / 分類結果" },
+      { id: "final", x: 465, y: 2670, w: 250, h: 92, kind: "gpt", kicker: "Final · GPT stream", title: "最終回答生成", sub: "streamFinalAnswer", prompt: "final" }
+    ];
+
+    const EDGES = [
+      ["user", "queries"],
+      ["queries", "toc"],
+      ["toc", "search"],
+      ["search", "judge"],
+      ["judge", "d1"],
+      ["d1", "hybrid", "false"],
+      ["d1", "extract", "true"],
+      ["hybrid", "extract"],
+      ["extract", "multi"],
+      ["multi", "d2"],
+      ["d2", "tocF", "true"],
+      ["d2", "classify", "false"],
+      ["tocF", "searchF"],
+      ["searchF", "classify"],
+      ["classify", "patterns"],
+      ["patterns", "lang"],
+      ["lang", "ctx"],
+      ["ctx", "final"]
+    ];
+
+    const BOARD_W = 1180, BOARD_H = 2860;
+    const byId = Object.fromEntries(NODES.map((n) => [n.id, n]));
+    const viewport = document.getElementById("viewport");
+    const listEl = document.getElementById("list");
+    const board = document.createElement("div");
+    board.className = "board";
+    board.style.width = BOARD_W + "px";
+    board.style.height = BOARD_H + "px";
+    viewport.appendChild(board);
+
+    FRAMES.forEach((f) => {
+      const el = document.createElement("div");
+      el.className = "frame";
+      el.style.left = f.x + "px";
+      el.style.top = f.y + "px";
+      el.style.width = f.w + "px";
+      el.style.height = f.h + "px";
+      el.innerHTML = `<span class="ft">${f.title}</span>`;
+      board.appendChild(el);
+    });
+
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "wires");
+    svg.setAttribute("width", BOARD_W);
+    svg.setAttribute("height", BOARD_H);
+    svg.innerHTML = `<defs>
+      <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#9ca3af"/>
+      </marker>
+    </defs>`;
+    board.appendChild(svg);
+
+    function anchor(n, side) {
+      const cx = n.x + n.w / 2, cy = n.y + n.h / 2;
+      const inset = n.shape === "diamond" ? 28 : 0;
+      if (side === "top") return [cx, n.y + inset];
+      if (side === "bottom") return [cx, n.y + n.h - inset];
+      if (side === "left") return [n.x + inset, cy];
+      return [n.x + n.w - inset, cy];
+    }
+
+    function roundPath(pts, r) {
+      if (pts.length < 2) return "";
+      let d = `M ${pts[0][0]} ${pts[0][1]}`;
+      for (let i = 1; i < pts.length - 1; i++) {
+        const [x0, y0] = pts[i - 1];
+        const [x1, y1] = pts[i];
+        const [x2, y2] = pts[i + 1];
+        const d1 = Math.hypot(x1 - x0, y1 - y0) || 1;
+        const d2 = Math.hypot(x2 - x1, y2 - y1) || 1;
+        const rr = Math.min(r, d1 / 2, d2 / 2);
+        const ax = x1 - (x1 - x0) / d1 * rr;
+        const ay = y1 - (y1 - y0) / d1 * rr;
+        const bx = x1 + (x2 - x1) / d2 * rr;
+        const by = y1 + (y2 - y1) / d2 * rr;
+        d += ` L ${ax} ${ay} Q ${x1} ${y1} ${bx} ${by}`;
+      }
+      const last = pts[pts.length - 1];
+      d += ` L ${last[0]} ${last[1]}`;
+      return d;
+    }
+
+    function drawEdge(a, b, label) {
+      let from = "bottom", to = "top";
+      if (label === "false") from = "left";
+      if (label === "true" && a.shape === "diamond") from = "bottom";
+      if (b.x + b.w < a.x - 20) { from = a.shape === "diamond" ? "left" : "left"; to = "top"; }
+      if (a.x + a.w < b.x - 40 && a.shape !== "diamond") { from = "bottom"; to = "top"; }
+      const [x1, y1] = anchor(a, from);
+      const [x2, y2] = anchor(b, to);
+      let pts;
+      if (Math.abs(x1 - x2) < 6) {
+        pts = [[x1, y1], [x2, y2]];
+      } else if (from === "left") {
+        const xL = Math.min(x1, x2) - 36;
+        pts = [[x1, y1], [xL, y1], [xL, y2], [x2, y2]];
+      } else {
+        const midY = y1 + Math.max(28, (y2 - y1) * 0.35);
+        pts = [[x1, y1], [x1, midY], [x2, midY], [x2, y2]];
+      }
+      const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      p.setAttribute("d", roundPath(pts, 12));
+      p.setAttribute("fill", "none");
+      p.setAttribute("stroke", "#9ca3af");
+      p.setAttribute("stroke-width", "1.8");
+      p.setAttribute("marker-end", "url(#arrow)");
+      svg.appendChild(p);
+      if (label) {
+        const el = document.createElement("div");
+        el.className = "elabel";
+        el.textContent = label;
+        const lx = from === "left" ? Math.min(x1, x2) - 28 : x1 + 10;
+        const ly = from === "left" ? y1 - 14 : y1 + 10;
+        el.style.left = lx + "px";
+        el.style.top = ly + "px";
+        board.appendChild(el);
+      }
+    }
+
+    function nodeHtml(n) {
+      const chips = n.prompt ? `<span class="chips"><span class="chip sys">SYS</span><span class="chip usr">USR</span></span>` : "";
+      return `<span class="bar"></span><div class="kicker"><span>${n.kicker || ""}</span>${chips}</div><div class="title">${n.title}</div><div class="sub">${n.sub || ""}</div>`;
+    }
+
+    NODES.forEach((n) => {
+      if (n.shape === "diamond") {
+        const b = document.createElement("button");
+        b.className = "diamond";
+        b.style.left = n.x + "px";
+        b.style.top = n.y + "px";
+        b.dataset.id = n.id;
+        b.innerHTML = `<div class="shape"></div><div class="lab">${n.title}</div>`;
+        b.onclick = () => openNode(n.id);
+        board.appendChild(b);
+        return;
+      }
+      const b = document.createElement("button");
+      b.className = "node " + n.kind;
+      b.style.left = n.x + "px";
+      b.style.top = n.y + "px";
+      b.style.width = n.w + "px";
+      b.style.minHeight = n.h + "px";
+      b.dataset.id = n.id;
+      b.innerHTML = nodeHtml(n);
+      b.onclick = () => openNode(n.id);
+      board.appendChild(b);
+    });
+    EDGES.forEach(([a, b, label]) => drawEdge(byId[a], byId[b], label));
+
+    function renderList() {
+      const order = ["user","queries","toc","search","judge","d1","hybrid","extract","multi","d2","tocF","searchF","classify","patterns","lang","ctx","final"];
+      const skipArrowBefore = new Set(["hybrid", "tocF", "extract", "classify"]);
+      let html = "";
+      function card(id) {
+        const n = byId[id];
+        const chips = n.prompt ? `<span class="chips"><span class="chip sys">SYS</span><span class="chip usr">USR</span></span>` : "";
+        return `<button class="list-card ${n.kind}" data-id="${id}"><span class="bar"></span><div class="kicker"><span>${n.kicker || (n.shape === "diamond" ? "分岐" : "")}</span>${chips}</div><div class="title">${n.title}</div><div class="sub">${n.sub || ""}</div></button>`;
+      }
+      for (const id of order) {
+        if (id === "d1") {
+          html += card("d1");
+          html += `<div class="branch-row">
+            <div class="branch-col"><div class="blab">false</div>${card("hybrid")}</div>
+            <div class="branch-col"><div class="blab">true</div><div class="empty" style="padding:18px 8px;text-align:center">そのまま次へ</div></div>
+          </div><div class="v-arrow"></div>`;
+          continue;
+        }
+        if (id === "hybrid") continue;
+        if (id === "d2") {
+          html += card("d2");
+          html += `<div class="branch-row">
+            <div class="branch-col"><div class="blab">true</div>${card("tocF")}<div class="v-arrow"></div>${card("searchF")}</div>
+            <div class="branch-col"><div class="blab">false</div><div class="empty" style="padding:18px 8px;text-align:center">追加検索をスキップ</div></div>
+          </div><div class="v-arrow"></div>`;
+          continue;
+        }
+        if (id === "tocF" || id === "searchF") continue;
+        if (!skipArrowBefore.has(id) && html) html += `<div class="v-arrow"></div>`;
+        html += card(id);
+      }
+      listEl.innerHTML = html;
+      listEl.querySelectorAll("[data-id]").forEach((el) => {
+        el.onclick = () => openNode(el.dataset.id);
+      });
+    }
+    renderList();
+
+    let scale = 1, tx = 40, ty = 20, dragging = false, sx = 0, sy = 0, ox = 0, oy = 0, moved = false;
+    const pointers = new Map();
+    let pinch = null;
+
+    function apply() {
+      board.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+    }
+    function zoomAt(mx, my, next) {
+      const prev = scale;
+      scale = Math.min(1.9, Math.max(0.28, next));
+      tx = mx - (mx - tx) * (scale / prev);
+      ty = my - (my - ty) * (scale / prev);
+      apply();
+    }
+    function fit() {
+      const r = viewport.getBoundingClientRect();
+      if (r.width < 8 || r.height < 8) return;
+      scale = Math.min((r.width - 28) / BOARD_W, (r.height - 28) / BOARD_H, 1);
+      tx = (r.width - BOARD_W * scale) / 2;
+      ty = 12;
+      apply();
+    }
+    function focusStart() {
+      const r = viewport.getBoundingClientRect();
+      scale = Math.min(1, Math.max(0.72, (r.width - 48) / 520));
+      tx = Math.max(12, (r.width - 250 * scale) / 2 - 465 * scale);
+      ty = 16;
+      apply();
+    }
+
+    viewport.addEventListener("pointerdown", (e) => {
+      if (e.target.closest(".node, .diamond, .toolbtn")) return;
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      viewport.setPointerCapture(e.pointerId);
+      if (pointers.size === 1) {
+        dragging = true; moved = false;
+        viewport.classList.add("drag");
+        sx = e.clientX; sy = e.clientY; ox = tx; oy = ty;
+      } else if (pointers.size === 2) {
+        dragging = false;
+        const pts = [...pointers.values()];
+        pinch = {
+          d: Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y),
+          scale,
+          mx: (pts[0].x + pts[1].x) / 2,
+          my: (pts[0].y + pts[1].y) / 2
+        };
+      }
+    });
+    viewport.addEventListener("pointermove", (e) => {
+      if (!pointers.has(e.pointerId)) return;
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pointers.size === 2 && pinch) {
+        const pts = [...pointers.values()];
+        const d = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+        const r = viewport.getBoundingClientRect();
+        zoomAt(pinch.mx - r.left, pinch.my - r.top, pinch.scale * (d / (pinch.d || 1)));
+        return;
+      }
+      if (!dragging) return;
+      const dx = e.clientX - sx, dy = e.clientY - sy;
+      if (Math.abs(dx) + Math.abs(dy) > 4) moved = true;
+      tx = ox + dx; ty = oy + dy; apply();
+    });
+    function endPointer(e) {
+      pointers.delete(e.pointerId);
+      if (pointers.size < 2) pinch = null;
+      if (pointers.size === 0) { dragging = false; viewport.classList.remove("drag"); }
+    }
+    viewport.addEventListener("pointerup", endPointer);
+    viewport.addEventListener("pointercancel", endPointer);
+    viewport.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const r = viewport.getBoundingClientRect();
+      zoomAt(e.clientX - r.left, e.clientY - r.top, scale * (e.deltaY > 0 ? 0.92 : 1.08));
+    }, { passive: false });
+
+    document.getElementById("zoom-in").onclick = () => {
+      const r = viewport.getBoundingClientRect();
+      zoomAt(r.width / 2, r.height / 2, scale * 1.15);
+    };
+    document.getElementById("zoom-out").onclick = () => {
+      const r = viewport.getBoundingClientRect();
+      zoomAt(r.width / 2, r.height / 2, scale / 1.15);
+    };
+    document.getElementById("fit").onclick = fit;
+
+    const viewBoard = document.getElementById("view-board");
+    const viewList = document.getElementById("view-list");
+    function setView(mode) {
+      const list = mode === "list";
+      listEl.classList.toggle("show", list);
+      viewport.classList.toggle("hide", list);
+      viewBoard.classList.toggle("active", !list);
+      viewList.classList.toggle("active", list);
+    }
+    viewBoard.onclick = () => setView("board");
+    viewList.onclick = () => setView("list");
+    setView(window.matchMedia("(max-width: 900px)").matches ? "list" : "board");
+    focusStart();
+
+    const sidebar = document.getElementById("sidebar");
+    const backdrop = document.getElementById("backdrop");
+    const winBtn = document.getElementById("win");
+    let current = null;
+    function esc(s) {
+      return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+    }
+    function close() { sidebar.classList.remove("open"); backdrop.classList.remove("show"); }
+    document.getElementById("close").onclick = close;
+    backdrop.onclick = close;
+
+    function promptBlock(kind, label, text, id) {
+      return `<div class="prompt"><h3 class="${kind}">${label} <button class="copy" data-t="${id}">Copy</button></h3><pre id="${id}">${esc(text)}</pre></div>`;
+    }
+
+    function openNode(id) {
+      current = id;
+      document.querySelectorAll(".node.active, .diamond.active, .list-card.active").forEach((n) => n.classList.remove("active"));
+      document.querySelectorAll(`[data-id="${id}"]`).forEach((n) => n.classList.add("active"));
+      const n = byId[id];
+      const prompt = n.prompt ? P[n.prompt] : null;
+      document.getElementById("st").textContent = n.title;
+      document.getElementById("ss").textContent = prompt ? prompt.fn : (n.sub || n.kicker || "GPT なし");
+      if (!prompt) {
+        winBtn.hidden = true;
+        const extra = n.id === "d1"
+          ? "false のときだけハイブリッド検索（Embedding + Azure AI Search）を行い、結果を initial_results にマージしてから要素抽出へ進みます。"
+          : n.id === "d2"
+          ? "true のときだけ追加 TOC 選定 → 追加パス検索を行い、false なら章分類へスキップします。"
+          : "このステップは Azure Search / アプリ処理のみで、生成AIプロンプトは使いません。";
+        document.getElementById("sb").innerHTML = `<div class="empty">${esc(n.sub || "")}<br><br>${extra}</div>`;
+      } else {
+        winBtn.hidden = false;
+        let html = promptBlock("sys", "System Prompt", prompt.system, "sys") + promptBlock("usr", "User Prompt", prompt.user, "usr");
+        if (prompt.addons) {
+          html += `<p class="note">最終回答の System Prompt は、判定結果に応じて次のブロックが連結されます。</p>`;
+          html += prompt.addons.map((a) => `<div class="addon"><h4>${esc(a.title)}</h4><pre style="margin:0;background:transparent;border:0;padding:0">${esc(a.body)}</pre></div>`).join("");
+        }
+        document.getElementById("sb").innerHTML = html;
+        document.querySelectorAll(".copy").forEach((b) => {
+          b.onclick = () => navigator.clipboard.writeText(document.getElementById(b.dataset.t).innerText).then(() => {
+            b.textContent = "Copied";
+            setTimeout(() => b.textContent = "Copy", 900);
+          });
+        });
+      }
+      sidebar.classList.add("open");
+      backdrop.classList.add("show");
+    }
+
+    winBtn.onclick = () => {
+      const n = byId[current];
+      const prompt = n && n.prompt ? P[n.prompt] : null;
+      if (!prompt) return;
+      const w = window.open("", "_blank", "noopener,noreferrer,width=920,height=820");
+      if (!w) return;
+      w.document.write(`<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(prompt.title)}</title>
+        <style>body{font-family:ui-sans-serif,system-ui;margin:0;padding:24px;color:#111} h1{font-size:18px} h2{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#6b7280} pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:12px;font-size:12px}</style></head>
+        <body><h1>${esc(prompt.title)}</h1><p>${esc(prompt.fn)}</p>
+        <h2>System Prompt</h2><pre>${esc(prompt.system)}</pre>
+        <h2>User Prompt</h2><pre>${esc(prompt.user)}</pre></body></html>`);
+      w.document.close();
+    };
+  </script>
+</body>
+</html>

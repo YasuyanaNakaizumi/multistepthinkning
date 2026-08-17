@@ -21,6 +21,7 @@ import {
   ChevronRight,
   ExternalLink,
   Image as ImageIcon,
+  Menu,
 } from 'lucide-react';
 import { ChatMessage as ChatMessageType, ThinkingStep } from './types';
 import type { Document } from './types';
@@ -110,11 +111,14 @@ function App() {
   const [isAzureAdReady, setIsAzureAdReady] = useState(false);
   const [isAzureAdEnabled, setIsAzureAdEnabled] = useState(false);
   const [activeThinkingSourceKey, setActiveThinkingSourceKey] = useState('shop_manual');
+  const [showMobileNav, setShowMobileNav] = useState(false);
+  const [composerPad, setComposerPad] = useState(180);
   const selectedDocuments = [selectedShopManual, selectedOperationManual].filter(Boolean) as Document[];
   const resizePointerIdRef = useRef<number | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const composerRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const shouldAutoScrollRef = useRef(true);
 
@@ -165,6 +169,24 @@ function App() {
 
     return () => {
       isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    const apply = () => {
+      const vv = window.visualViewport;
+      root.style.setProperty('--app-height', `${vv?.height ?? window.innerHeight}px`);
+      root.style.setProperty('--app-offset-top', `${vv?.offsetTop ?? 0}px`);
+    };
+    apply();
+    window.visualViewport?.addEventListener('resize', apply);
+    window.visualViewport?.addEventListener('scroll', apply);
+    window.addEventListener('resize', apply);
+    return () => {
+      window.visualViewport?.removeEventListener('resize', apply);
+      window.visualViewport?.removeEventListener('scroll', apply);
+      window.removeEventListener('resize', apply);
     };
   }, []);
 
@@ -462,7 +484,7 @@ function App() {
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       handleSend();
     }
@@ -529,9 +551,20 @@ function App() {
     />
   ) : null;
 
+  useEffect(() => {
+    if (isLanding) return;
+    const el = composerRef.current;
+    if (!el) return;
+    const update = () => setComposerPad(el.offsetHeight + 24);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [isLanding, isLoading, canChat, selectedDocumentParts.join('|')]);
+
   if (!isAzureAdReady) {
     return (
-      <div className="flex h-screen items-center justify-center bg-neutral-50 px-4 text-neutral-500">
+      <div className="flex h-[var(--app-height,100dvh)] items-center justify-center bg-neutral-50 px-4 text-neutral-500">
         <div className="flex items-center gap-2 text-sm">
           <Loader2 className="h-4 w-4 animate-spin" />
           <span>Azure AD認証画面へ移動しています…</span>
@@ -541,18 +574,39 @@ function App() {
   }
 
   return (
-    <div className="flex h-screen bg-neutral-50 text-neutral-900">
-      <aside className="w-[220px] shrink-0 border-r border-neutral-200 bg-white flex flex-col">
-        <div className="p-2">
+    <div className="flex h-[var(--app-height,100dvh)] max-w-[100vw] overflow-hidden bg-neutral-50 text-neutral-900">
+      {showMobileNav && (
+        <div
+          className="fixed inset-0 z-30 bg-neutral-900/40 md:hidden"
+          onClick={() => setShowMobileNav(false)}
+        />
+      )}
+      <aside
+        className={`w-[min(220px,85vw)] bg-white flex flex-col border-r border-neutral-200 fixed inset-y-0 left-0 z-40 transform transition-transform pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] md:static md:translate-x-0 md:shrink-0 md:pt-0 md:pb-0 ${
+          showMobileNav ? 'translate-x-0' : '-translate-x-full'
+        }`}
+      >
+        <div className="p-2 flex items-center gap-2">
           <button
             type="button"
-            onClick={resetChat}
+            onClick={() => {
+              resetChat();
+              setShowMobileNav(false);
+            }}
             disabled={isLoading}
-            className="w-full flex items-center justify-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-sm font-medium text-neutral-800 transition hover:border-neutral-300 hover:bg-neutral-50 disabled:opacity-50"
+            className="flex-1 flex items-center justify-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-sm font-medium text-neutral-800 transition hover:border-neutral-300 hover:bg-neutral-50 disabled:opacity-50"
             title="新規チャット"
           >
             <Plus className="h-4 w-4" />
             新規チャット
+          </button>
+          <button
+            type="button"
+            className="md:hidden inline-flex h-10 w-10 items-center justify-center rounded-md hover:bg-neutral-100"
+            onClick={() => setShowMobileNav(false)}
+            title="閉じる"
+          >
+            <X className="h-4 w-4" />
           </button>
         </div>
         {isAzureAdEnabled && (
@@ -577,12 +631,32 @@ function App() {
         )}
       </aside>
 
-      <main className="flex-1 flex flex-col min-w-0 relative">
+      <main className="flex-1 flex flex-col min-w-0 relative overflow-hidden">
+        <div className="md:hidden min-h-11 px-3 pt-[env(safe-area-inset-top)] border-b border-neutral-200 bg-white flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => setShowMobileNav(true)}
+            className="inline-flex h-10 w-10 items-center justify-center rounded-md hover:bg-neutral-100"
+            title="メニュー"
+          >
+            <Menu className="h-5 w-5" />
+          </button>
+          <div className="flex-1 min-w-0 text-sm font-semibold truncate">改善版AI bot試作版</div>
+          <button
+            type="button"
+            onClick={resetChat}
+            disabled={isLoading}
+            className="inline-flex items-center gap-1 rounded-md border border-neutral-200 px-2.5 py-1.5 text-xs font-medium hover:bg-neutral-50 disabled:opacity-50"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            新規
+          </button>
+        </div>
         {isLanding ? (
-          <div className="flex-1 flex flex-col items-center justify-center px-4">
-            <div className="w-full max-w-2xl flex flex-col items-center">
-              <div className="text-center mb-8">
-                <h1 className="text-3xl font-semibold tracking-tight text-neutral-900">
+          <div className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-6 flex flex-col items-center justify-center">
+            <div className="w-full max-w-2xl min-w-0 flex flex-col items-center">
+              <div className="text-center mb-6 sm:mb-8">
+                <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight text-neutral-900">
                   改善版AI bot試作版
                 </h1>
                 <p className="mt-2 text-sm text-neutral-500 leading-relaxed">
@@ -625,8 +699,11 @@ function App() {
           </div>
         ) : (
           <>
-            <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto">
-              <div className="max-w-3xl mx-auto w-full px-4 pt-4 pb-36 space-y-4">
+            <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain">
+              <div
+                className="max-w-3xl mx-auto w-full min-w-0 px-3 sm:px-4 pt-4 space-y-4"
+                style={{ paddingBottom: composerPad }}
+              >
                 {messages.map((message, index) => (
                   <ChatMessage
                     key={index}
@@ -662,8 +739,8 @@ function App() {
               </div>
             </div>
 
-            <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-neutral-50 via-neutral-50/95 to-transparent pt-10 pb-4 px-4">
-              <div className="pointer-events-auto max-w-3xl mx-auto">
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-neutral-50 via-neutral-50/95 to-transparent pt-10 px-3 sm:px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+              <div ref={composerRef} className="pointer-events-auto max-w-3xl mx-auto min-w-0">
                 {isLoading && (
                   <div className="mb-2 flex justify-center">
                     <Button
@@ -688,7 +765,7 @@ function App() {
       {preview && preview.url && (
         <>
           <div
-            className="w-1.5 cursor-col-resize bg-transparent hover:bg-neutral-200/70 active:bg-neutral-300/70"
+            className="hidden md:block w-1.5 cursor-col-resize bg-transparent hover:bg-neutral-200/70 active:bg-neutral-300/70"
             onPointerDown={(e) => {
               e.preventDefault();
               try {
@@ -701,8 +778,11 @@ function App() {
             }}
             title="Drag to resize"
           />
-          <aside className="shrink-0 border-l border-neutral-200 bg-white flex flex-col" style={{ width: pdfPanelWidth }}>
-            <div className="h-10 px-3 border-b border-neutral-200 flex items-center gap-1.5">
+          <aside
+            className="fixed inset-0 z-50 w-full max-w-[100vw] bg-white flex flex-col md:static md:inset-auto md:z-auto md:shrink-0 md:border-l md:border-neutral-200 md:w-[var(--panel-width)]"
+            style={{ ['--panel-width' as string]: `${pdfPanelWidth}px` } as React.CSSProperties}
+          >
+            <div className="min-h-10 px-3 py-1.5 border-b border-neutral-200 flex items-center gap-1.5 flex-wrap">
               {preview.kind === 'pdf' ? (
                 <FileText className="h-4 w-4 text-neutral-500 shrink-0" />
               ) : (
@@ -807,15 +887,10 @@ function SelectedDocumentsLine({
   onChange: () => void;
 }) {
   return (
-    <div className="flex items-center gap-2 min-w-0">
-      <div className="flex-1 min-w-0 flex items-center gap-1.5 text-[11px] text-neutral-500" title={title}>
-        <BookOpen className="h-3 w-3 shrink-0 text-neutral-400" />
-        {parts.map((part, index) => (
-          <span key={`${part}-${index}`} className="flex min-w-0 items-center gap-1.5">
-            {index > 0 && <span className="shrink-0 text-neutral-300">·</span>}
-            <span className="truncate">{part}</span>
-          </span>
-        ))}
+    <div className="flex items-start gap-2 min-w-0">
+      <div className="flex-1 min-w-0 text-[11px] leading-4 text-neutral-500 break-words" title={title}>
+        <BookOpen className="h-3 w-3 mr-1 inline-block align-text-top text-neutral-400" />
+        {parts.join(' · ')}
       </div>
       <button
         type="button"
@@ -854,8 +929,8 @@ function ChatComposer({
   onChangeDocuments: () => void;
 }) {
   return (
-    <div className="border border-neutral-300 rounded-2xl bg-white shadow-sm px-3 pt-2.5 pb-2 transition-colors focus-within:border-neutral-500 focus-within:shadow-md">
-      <div className="flex items-start gap-2">
+    <div className="border border-neutral-300 rounded-2xl bg-white shadow-sm px-3 pt-2.5 pb-2 transition-colors focus-within:border-neutral-500 focus-within:shadow-md min-w-0">
+      <div className="flex items-start gap-2 min-w-0">
         <textarea
           ref={textareaRef}
           value={value}
@@ -865,7 +940,7 @@ function ChatComposer({
           title="Enterで送信 · Shift+Enterで改行"
           disabled={isLoading}
           rows={2}
-          className="flex-1 resize-none outline-none text-sm leading-6 min-h-[52px] max-h-40 bg-transparent py-0.5 disabled:text-neutral-400 disabled:cursor-not-allowed"
+          className="flex-1 min-w-0 resize-none outline-none text-base sm:text-sm leading-6 min-h-[52px] max-h-40 bg-transparent py-0.5 disabled:text-neutral-400 disabled:cursor-not-allowed"
         />
         <Button
           onClick={onSend}
@@ -932,31 +1007,31 @@ function DocumentSetupModal({
   onClose: () => void;
 }) {
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-40 flex items-end sm:items-center justify-center p-0 sm:p-4">
       <div className="absolute inset-0 bg-neutral-900/40 backdrop-blur-[2px]" onClick={onClose} />
       <div
-        className="relative w-full max-w-3xl max-h-[88vh] bg-white rounded-2xl shadow-2xl flex flex-col overflow-hidden"
+        className="relative w-full sm:max-w-3xl h-[var(--app-height,100dvh)] sm:h-auto sm:max-h-[min(88vh,var(--app-height,88vh))] bg-white sm:rounded-2xl shadow-2xl flex flex-col overflow-hidden"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-labelledby="doc-setup-title"
       >
-        <div className="px-6 py-4 border-b border-neutral-200 flex items-start justify-between gap-3">
-          <div>
+        <div className="px-4 sm:px-6 py-3 sm:py-4 border-b border-neutral-200 flex items-start justify-between gap-3">
+          <div className="min-w-0">
             <h2 id="doc-setup-title" className="text-lg font-semibold tracking-tight">
               ドキュメント設定
             </h2>
-            <p className="text-sm text-neutral-500 mt-0.5">
+            <p className="text-sm text-neutral-500 mt-0.5 break-words">
               機種型式・機番・言語を指定して検索し、各マニュアルから1冊ずつ選択します。
             </p>
           </div>
-          <Button variant="ghost" size="icon" onClick={onClose} title="閉じる">
+          <Button variant="ghost" size="icon" onClick={onClose} title="閉じる" className="shrink-0">
             <X className="h-4 w-4" />
           </Button>
         </div>
 
-        <div className="px-6 py-5 border-b border-neutral-100">
-          <div className="flex items-end gap-2">
-            <div className="min-w-0 flex-[1.4]">
+        <div className="px-4 sm:px-6 py-4 sm:py-5 border-b border-neutral-100">
+          <div className="flex flex-col sm:flex-row sm:items-end gap-2">
+            <div className="min-w-0 sm:flex-[1.4]">
               <label className="block text-xs font-medium text-neutral-600 mb-1">
                 機種型式 <span className="text-red-500">*</span>
               </label>
@@ -965,25 +1040,25 @@ function DocumentSetupModal({
                 value={model}
                 onChange={(e) => onModelChange(e.target.value)}
                 placeholder="例: PC200-10M0"
-                className="w-full px-3 py-2 text-sm border border-neutral-300 rounded-lg focus:outline-none focus:border-neutral-500"
+                className="w-full px-3 py-2 text-base sm:text-sm border border-neutral-300 rounded-lg focus:outline-none focus:border-neutral-500"
               />
             </div>
-            <div className="min-w-0 flex-1">
+            <div className="min-w-0 sm:flex-1">
               <label className="block text-xs font-medium text-neutral-600 mb-1">機番</label>
               <input
                 type="text"
                 value={serial}
                 onChange={(e) => onSerialChange(e.target.value)}
                 placeholder="任意"
-                className="w-full px-3 py-2 text-sm border border-neutral-300 rounded-lg focus:outline-none focus:border-neutral-500"
+                className="w-full px-3 py-2 text-base sm:text-sm border border-neutral-300 rounded-lg focus:outline-none focus:border-neutral-500"
               />
             </div>
-            <div className="w-[148px] shrink-0">
+            <div className="w-full sm:w-[148px] shrink-0">
               <label className="block text-xs font-medium text-neutral-600 mb-1">ドキュメント言語</label>
               <select
                 value={language}
                 onChange={(e) => onLanguageChange(e.target.value)}
-                className="w-full px-3 py-2 text-sm border border-neutral-300 rounded-lg focus:outline-none focus:border-neutral-500 bg-white"
+                className="w-full px-3 py-2 text-base sm:text-sm border border-neutral-300 rounded-lg focus:outline-none focus:border-neutral-500 bg-white"
               >
                 {LANGUAGES.map((lang) => (
                   <option key={lang.value} value={lang.value}>
@@ -995,7 +1070,7 @@ function DocumentSetupModal({
             <Button
               onClick={onSearch}
               disabled={!model.trim() || isSearching}
-              className="shrink-0 gap-1.5"
+              className="w-full sm:w-auto shrink-0 gap-1.5"
             >
               {isSearching ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
               検索
@@ -1008,7 +1083,7 @@ function DocumentSetupModal({
           )}
         </div>
 
-        <div className="flex-1 overflow-y-auto px-6 py-5 min-h-[220px]">
+        <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-4 sm:py-5 min-h-[160px]">
           {!hasSearched ? (
             <div className="h-full min-h-[180px] flex flex-col items-center justify-center text-center text-neutral-500">
               <Search className="h-8 w-8 text-neutral-300 mb-3" />
@@ -1017,9 +1092,9 @@ function DocumentSetupModal({
             </div>
           ) : (
             <div className="space-y-4">
-              <div className="flex items-center justify-between gap-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                 <div className="text-xs font-semibold text-neutral-500 uppercase tracking-wide">ドキュメント一覧</div>
-                <div className="relative w-56">
+                <div className="relative w-full sm:w-56">
                   <Search className="absolute left-2.5 top-2 h-4 w-4 text-neutral-400" />
                   <input
                     type="text"
@@ -1058,15 +1133,15 @@ function DocumentSetupModal({
           )}
         </div>
 
-        <div className="px-6 py-4 border-t border-neutral-200 bg-neutral-50 flex items-center justify-between gap-3">
-          <div className="text-xs text-neutral-500">
+        <div className="px-4 sm:px-6 py-3 sm:py-4 border-t border-neutral-200 bg-neutral-50 flex items-center justify-between gap-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+          <div className="text-xs text-neutral-500 min-w-0 break-words">
             {selectedCount > 0 ? `${selectedCount}冊を選択中` : '各カテゴリから1冊ずつ選択できます'}
           </div>
-          <div className="flex items-center gap-2">
-            <Button variant="ghost" onClick={onClose}>
+          <div className="flex items-center gap-2 shrink-0">
+            <Button variant="ghost" onClick={onClose} className="px-3">
               キャンセル
             </Button>
-            <Button onClick={onClose} disabled={selectedCount === 0}>
+            <Button onClick={onClose} disabled={selectedCount === 0} className="px-3">
               完了
             </Button>
           </div>
