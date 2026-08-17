@@ -332,8 +332,14 @@ Recent Chat History (most recent last):
       tocFollow: {
         title: "7a. 追加 TOC 選定",
         fn: "selectTOCChapters",
-        system: "You are an expert at finding relevant TOC path values in technical manuals. Prefer the deepest, most specific paths.",
+        system: "You are an expert at finding relevant TOC path values in technical manuals. Prefer the deepest, most specific paths. Return only additional TOC paths that have not already been searched.",
         user: `Below is the Table of Contents of available manuals. Given the search queries, select the TOC path values that are most likely to contain the needed information.
+
+## Already Searched Chapters
+These chapters were already retrieved in the previous search. Their titles and paths are listed below.
+Do NOT select the same items again. Extract ONLY the additional TOC paths that still need to be added.
+
+{{alreadySearchedChapters as [{ title, path }, ...] from initial search results}}
 
 ## Rules
 1. Return the EXACT path strings as they appear in the TOC.
@@ -341,12 +347,13 @@ Recent Chat History (most recent last):
 3. Prefer leaf-level / deepest / most specific paths.
 4. You MUST be exhaustive, not conservative.
 5. Do NOT return titles. Return path values only.
-6. Fault codes: For each error code, include ALL TOC paths that contain that error code.
-7. Connectors: include connector list/layout AND the full 3D layout series (1)(2)(3).
-8. Inspections: include pre-diagnostic inspection and electrical inspection when present.
-9. Components: include location / explanation paths.
-10. Maintenance: include child item/procedure paths, not only the schedule parent.
-10. Return JSON only.
+6. Do not re-select a TOC path or title that already appears in Already Searched Chapters. If a previously searched parent is already covered, still include a child path only when that child itself was not searched and is needed.
+7. Fault codes: For each error code, include ALL TOC paths that contain that error code, except those already searched.
+8. Connectors: include connector list/layout AND the full 3D layout series (1)(2)(3).
+9. Inspections: include pre-diagnostic inspection and electrical inspection when present.
+10. Components: include location / explanation paths.
+11. Maintenance: include child item/procedure paths, not only the schedule parent.
+12. Return JSON only.
 
 ## Output Format
 { "chapters": ["XXXXXXXXXXXXX", "XXXXXXXXXX"] }
@@ -435,13 +442,17 @@ Output JSON only:
 Answer Creation Rules:
 0. Language (CRITICAL): Always write the entire answer in the same language as the user's question, regardless of the document language.
 1. Summary: Begin every answer with a 3-4 sentence summary.
-2. Completeness: Reproduce every procedure step, numeric value, pass/fail criterion, and explicit condition in the Context.
+2. Completeness: Reproduce every procedure step, numeric value, pass/fail criterion, and explicit condition from MAIN refs. Do not reproduce SUB body text.
 3. Safety: Mark warnings (▼) and cautions (!).
 4. No Hallucination: Do not write facts that are not in the Context.
 5. No Chapter Mixing: Do not mix procedures from different chapters into one step.
+5b. Document Ref roles (follow CHAPTER_CLASSIFICATION_JSON):
+   - MAIN: write the answer body from these refs.
+   - SUB: do not write SUB prose/tables/images; display only PDF_CITATION_MARKDOWN.
+   - CONNECTOR: you MAY write connector information in the answer body. CONNECTOR is not treated like SUB.
 6. Structure: Natural headings matching the question and Context.
 7. Readability: Prefer headings, bullets, and Markdown tables.
-8. Citations: Copy PDF_CITATION_MARKDOWN byte-for-byte. No invented URLs.
+8. Citations: Copy PDF_CITATION_MARKDOWN byte-for-byte. Place one link at the end of each procedure step or short paragraph. No invented URLs.
 9. Cross-chapter References: Turn "〜を参照" / "see ..." into the matching Document Ref link.
 10. Images: insert [[IMG:<file name>]] on its own line. Backend replaces with SAS URLs. Never write raw image URLs.
 11. Required Tools: "## Required Tools" table when tools appear.
@@ -487,7 +498,7 @@ stream: true`,
       { id: "extract", x: 465, y: 1266, w: 250, h: 92, kind: "gpt", kicker: "Step 5a · GPT", title: "要素抽出", sub: "extractElements", prompt: "extract" },
       { id: "multi", x: 465, y: 1410, w: 250, h: 92, kind: "gpt", kicker: "Step 5a2 · GPT", title: "複数エラーコード検出", sub: "detectMultiErrorCodes", prompt: "multi" },
       { id: "d2", x: 516, y: 1548, w: 148, h: 148, kind: "branch", shape: "diamond", title: "needs_followup?" },
-      { id: "tocF", x: 80, y: 1790, w: 250, h: 92, kind: "gpt", kicker: "Step 5b · GPT", title: "追加 TOC 選定", sub: "selectTOCChapters", prompt: "tocFollow" },
+      { id: "tocF", x: 80, y: 1790, w: 250, h: 92, kind: "gpt", kicker: "Step 5b · GPT", title: "追加 TOC 選定", sub: "selectTOCChapters · 既検索章は除外", prompt: "tocFollow" },
       { id: "searchF", x: 80, y: 1934, w: 250, h: 92, kind: "search", kicker: "Step 5b · Search", title: "追加パス検索", sub: "Azure AI Search · GPTなし" },
       { id: "classify", x: 465, y: 2100, w: 250, h: 92, kind: "gpt", kicker: "Step 5c · GPT", title: "章分類 MAIN/SUB/CONNECTOR", sub: "classifyChapters", prompt: "classify" },
       { id: "patterns", x: 465, y: 2244, w: 250, h: 92, kind: "gpt", kicker: "Step 6b · GPT", title: "回答パターン分類", sub: "classifyAnswerPatterns", prompt: "patterns" },

@@ -469,15 +469,19 @@ function buildFinalAnswerSystemPromptBase(combinedContext: string): string {
 Answer Creation Rules:
 0. Language (CRITICAL / ABSOLUTE HIGHEST PRIORITY): Always write the entire answer in the same language as the user's question, regardless of the document language. This applies to the summary, headings, bullets, tables, connector labels, citations text around links, and all explanatory text. If the user's question mixes languages, follow the dominant language of the question. Do not switch to the document language unless the user explicitly asks for it. Never default to Japanese just because the documents are Japanese.
 1. Summary (CRITICAL): Begin every answer with a 3-4 sentence summary that tells the user the overall conclusion, what to do first, and what kind of answer follows.
-2. Completeness: Reproduce every procedure step, numeric value (torque, clearance, part number), pass/fail criterion, and explicit condition found in the Context. Do not shorten or summarize them away.
+2. Completeness: Reproduce every procedure step, numeric value (torque, clearance, part number), pass/fail criterion, and explicit condition found in MAIN Document Refs. Also reproduce connector facts from CONNECTOR Document Refs when connector information is required. Do not shorten or summarize them away. Do NOT reproduce procedure text, tables, or explanations from SUB Document Refs.
 3. Safety: Clearly mark warnings (▼) and cautions (!) at relevant steps.
 4. No Hallucination: Do not write facts that are not explicitly in the provided Context.
 5. No Chapter Mixing: Do not mix procedures from different chapters into one step, and only insert images that belong to the SAME Document Ref block as the text you are describing.
+5b. Document Ref roles (CRITICAL) — follow CHAPTER_CLASSIFICATION_JSON and the (MAIN) / (SUB) / (CONNECTOR) labels on each Document Ref:
+   - MAIN: Write the answer body from these refs (procedures, specifications, explanations, images).
+   - SUB: Do NOT write SUB chapter content as answer prose, steps, tables, or images. For each SUB ref, display only its PDF_CITATION_MARKDOWN (the PDF link). If a MAIN passage says "〜を参照" / "see ...", turn that mention into the matching SUB PDF link. Unused SUB links may be listed at the end under a short "Related documents" / "関連資料" heading that contains links only.
+   - CONNECTOR: You MAY and SHOULD write connector information in the answer body (tables, pin counts, installation position, 3D layout images) using CONNECTOR refs. CONNECTOR is not treated like SUB.
 6. Structure: Choose natural headings that match the question and the Context. Do not force a fixed structure beyond what the ANSWER MODE and CONNECTOR SECTION rules below require.
 7. Readability: Use Markdown tables for specification values, pin assignments, inspection steps with criteria, and parts lists with torque/clearance. Keep paragraphs short; prefer headings, bullets, and tables over walls of text.
 8. Citations:
    - Cite with the "PDF_CITATION_MARKDOWN" strings from the Context, copied byte-for-byte. Never invent, shorten, or re-encode a URL, and never use "#", "javascript:", or "localhost".
-   - Place one citation at natural boundaries (end of a major step, paragraph, or group of related claims) - not after every sentence, and not on every bullet.
+   - Place one citation at the end of each procedure step or each short paragraph. That granularity is allowed and preferred. Do not cite after every sentence, and do not put a citation on every bullet in a tight list that is still one step.
    - Each citation must come from the Document Ref that actually contains the evidence. If a sentence combines several refs, attach one link per ref.
    - If a Document Ref has no PDF_CITATION_MARKDOWN, write its title as plain text.
    - No links inside tables, except a "参照" / "参考" / "Reference" column.
@@ -487,7 +491,7 @@ Answer Creation Rules:
     - Insert an image by writing \`[[IMG:<file name>]]\` on its own line, using a file name that literally appears in an "Image:" line or the "available_images" list of the SAME Document Ref.
     - FORBIDDEN: \`![name.jpg](...)\`, \`!name.jpg\`, or a bare \`name.jpg\` as a paragraph. Never invent a file name.
     - Place the token right after the sentence or step it illustrates; never collect images at the end.
-    - Coverage: insert a token for every procedure step, inspection item, connector, component, and figure reference that has a matching file name. Prefer completeness.
+    - Coverage: insert a token for every procedure step, inspection item, connector, component, and figure reference that has a matching file name in a MAIN or CONNECTOR Document Ref. Prefer completeness. Do not insert images from SUB refs.
     - Do not put tokens inside tables, and do not mention the file name in the prose.
 11. Required Tools: Output a "## Required Tools" table at the end when the Context lists tools or the question involves assembly, disassembly, maintenance, or diagnostics.
 
@@ -761,21 +765,42 @@ export async function generateSearchQueries(userQuery: string, chatHistory: any[
   }
 }
 
+export type SearchedChapterRef = { title: string; path: string };
+
 export async function selectTOCChapters(
   queries: string[],
   userQuery: string,
-  tocContent: string
+  tocContent: string,
+  alreadySearchedChapters: SearchedChapterRef[] = []
 ): Promise<TOCChaptersResponse> {
   try {
-    return await chatJson<TOCChaptersResponse>([
+    const alreadySearchedJson = JSON.stringify(
+      alreadySearchedChapters
+        .map((chapter) => ({
+          title: (chapter.title || '').trim(),
+          path: (chapter.path || '').trim(),
+        }))
+        .filter((chapter) => chapter.title || chapter.path),
+      null,
+      2
+    );
+
+    const response = await chatJson<TOCChaptersResponse>([
       {
         role: 'system',
-        content: 'You are an expert at finding relevant TOC path values in technical manuals. Prefer the deepest, most specific paths.',
+        content:
+          'You are an expert at finding relevant TOC path values in technical manuals. Prefer the deepest, most specific paths. Return only additional TOC paths that have not already been searched.',
       },
       {
         role: 'user',
         content:
           `Below is the Table of Contents of available manuals. Given the search queries, select the TOC path values that are most likely to contain the needed information.
+
+## Already Searched Chapters
+These chapters were already retrieved in the previous search. Their titles and paths are listed below.
+Do NOT select the same items again. Extract ONLY the additional TOC paths that still need to be added.
+
+${alreadySearchedJson}
 
 ## Rules
 1. Return the EXACT path strings as they appear in the TOC (one path per line).
@@ -783,14 +808,15 @@ export async function selectTOCChapters(
 3. Prefer leaf-level / deepest / most specific paths over parent paths.
 4. You MUST be exhaustive, not conservative. If a relevant low-level path exists in the TOC, include it.
 5. Do NOT return titles. Return path values only.
-6. Fault codes: For each error code in the queries, include ALL TOC paths that contain that error code.
-7. Connectors: If connectors are present, include the connector list/layout path(s) AND ALL related 3D layout diagram paths in the TOC series. Do NOT stop at (1) or (2).
+6. Do not re-select a TOC path or title that already appears in Already Searched Chapters. If a previously searched parent is already covered, still include a child path only when that child itself was not searched and is needed.
+7. Fault codes: For each error code in the queries, include ALL TOC paths that contain that error code, except those already searched.
+8. Connectors: If connectors are present, include the connector list/layout path(s) AND ALL related 3D layout diagram paths in the TOC series. Do NOT stop at (1) or (2).
    - Match chapter titles that mention connector list and layout, connector layout, connector location, 3D立体配置図, or 3D layout diagram.
    - If the TOC series has multiple numbered entries such as (1), (2), and (3), include the whole series when they are connector layout/location or 3D diagram chapters.
-8. Inspections: If the query is diagnosis/inspection oriented, include prerequisite paths such as pre-diagnostic inspection and electrical inspection when present.
-9. Components: If components are present, include paths that likely describe the location or explanation of those components.
-10. Maintenance (OMM / 取扱説明書): If the query is about maintenance, メンテナンス, periodic maintenance, or 定期点検, and the TOC contains a "Maintenance" or "Periodic Maintenance" section, do NOT stop at the schedule/interval parent path. Also include the child / lower-level paths that describe specific maintenance items, procedures, inspection details, and adjustment/replacement steps under that maintenance tree.
-10. Return JSON only.
+9. Inspections: If the query is diagnosis/inspection oriented, include prerequisite paths such as pre-diagnostic inspection and electrical inspection when present.
+10. Components: If components are present, include paths that likely describe the location or explanation of those components.
+11. Maintenance (OMM / 取扱説明書): If the query is about maintenance, メンテナンス, periodic maintenance, or 定期点検, and the TOC contains a "Maintenance" or "Periodic Maintenance" section, do NOT stop at the schedule/interval parent path. Also include the child / lower-level paths that describe specific maintenance items, procedures, inspection details, and adjustment/replacement steps under that maintenance tree.
+12. Return JSON only.
 
 ## Output Format
 {
@@ -807,6 +833,19 @@ ${userQuery}
 ${tocContent}`,
       },
     ]);
+
+    const alreadyPaths = new Set(
+      alreadySearchedChapters.map((chapter) => (chapter.path || '').trim()).filter(Boolean)
+    );
+    const alreadyTitles = new Set(
+      alreadySearchedChapters.map((chapter) => (chapter.title || '').trim()).filter(Boolean)
+    );
+    return {
+      chapters: (response.chapters || []).filter((chapter) => {
+        const value = chapter.trim();
+        return value && !alreadyPaths.has(value) && !alreadyTitles.has(value);
+      }),
+    };
   } catch (error) {
     console.error('Error selecting TOC chapters:', error);
     return { chapters: [] };

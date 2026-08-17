@@ -190,6 +190,7 @@ export class MultiStepReasoningService {
   private refLinkMap: Map<string, string> = new Map();
   private refPdfUrlMap: Map<string, string> = new Map();
   private lastClassifiedResults: ClassifiedResults | null = null;
+  private lastIgnoreChapters: { title: string; path?: string }[] = [];
   private lastElements: any = null;
   private lastMultiError: { isMulti: boolean; codes: string[]; reason?: string } = { isMulti: false, codes: [] };
   private lastAnswerPatterns: AnswerPattern[] = ['general'];
@@ -421,6 +422,7 @@ export class MultiStepReasoningService {
     this.refLinkMap = new Map();
     this.refPdfUrlMap = new Map();
     this.lastClassifiedResults = null;
+    this.lastIgnoreChapters = [];
     this.lastElements = null;
     this.lastMultiError = { isMulti: false, codes: [] };
     this.lastAnswerPatterns = ['general'];
@@ -732,17 +734,64 @@ export class MultiStepReasoningService {
         }
 
         if (additionalTocContent) {
-          const chaptersResult = await selectTOCChapters(tocSearchTerms, query, additionalTocContent);
-          const selectedAdditionalPaths = additionalTocEntries.length > 0
-            ? keepExactPaths(chaptersResult.chapters, additionalTocEntries)
-            : chaptersResult.chapters.map((chapter) => chapter.trim());
-          logStep('7 TOC chapters (followup)', `${selectedAdditionalPaths.length} selected -> ${shortList(selectedAdditionalPaths)}`);
+          const alreadySearchedChapters = Array.from(
+            new Map(
+              initialResults
+                .map((result) => ({
+                  title: (result.TOC || '').trim(),
+                  path: (result.path || '').trim(),
+                }))
+                .filter((chapter) => chapter.title || chapter.path)
+                .map((chapter) => [chapter.path || chapter.title, chapter])
+            ).values()
+          );
+          logStep(
+            '7 already searched chapters',
+            `${alreadySearchedChapters.length} chapter(s) -> ${shortList(alreadySearchedChapters.map((chapter) => chapter.path || chapter.title))}`
+          );
+          const chaptersResult = await selectTOCChapters(
+            tocSearchTerms,
+            query,
+            additionalTocContent,
+            alreadySearchedChapters
+          );
+          const alreadyPathSet = new Set(alreadySearchedChapters.map((chapter) => chapter.path).filter(Boolean));
+          const selectedAdditionalPaths = (
+            additionalTocEntries.length > 0
+              ? keepExactPaths(chaptersResult.chapters, additionalTocEntries)
+              : chaptersResult.chapters.map((chapter) => chapter.trim())
+          ).filter((path) => path && !alreadyPathSet.has(path));
+          const pathToTitle = new Map(
+            additionalTocEntries.map((entry) => [entry.path, (entry.title || '').trim()])
+          );
+          const selectedAdditionalTitles = Array.from(
+            new Set(
+              selectedAdditionalPaths
+                .map((path) => pathToTitle.get(path) || path)
+                .map((title) => title.replace(/\s+/g, ' ').trim())
+                .filter(Boolean)
+            )
+          );
+          logStep(
+            '7 TOC chapters (followup)',
+            `${selectedAdditionalTitles.length} selected -> ${selectedAdditionalTitles.length > 0 ? selectedAdditionalTitles.join(' | ') : 'none'}`
+          );
           if (selectedAdditionalPaths.length > 0) {
             additionalResults = await searchTocAcrossIndexes(selectedAdditionalPaths, additionalTocEntries.length > 0);
             additionalResults.forEach(r => r._search_type = 'additional_toc');
           }
         }
-        logStep('7 search (followup)', `${additionalResults.length} hit(s) -> ${shortList(Array.from(new Set(additionalResults.map((r) => r.TOC))))}`);
+        const followupTocTitles = Array.from(
+          new Set(
+            additionalResults
+              .map((result) => (result.TOC || '').replace(/\s+/g, ' ').trim())
+              .filter(Boolean)
+          )
+        );
+        logStep(
+          '7 search (followup)',
+          `${additionalResults.length} hit(s) -> ${followupTocTitles.length > 0 ? followupTocTitles.join(' | ') : 'none'}`
+        );
         this.setStep(6, { status: 'completed', description: `Additional search completed. Found ${additionalResults.length} result(s)` });
       } catch (error) {
         this.setStep(6, { status: 'error', description: 'Additional search failed', error: (error as Error).message });
@@ -806,6 +855,10 @@ export class MultiStepReasoningService {
       logStep('8 SUB', shortList(classifiedResults.sub.map((r) => r.TOC)));
 
       this.lastClassifiedResults = classifiedResults;
+      this.lastIgnoreChapters = (classification.ignore || [])
+        .map((index) => uniqueResults[index])
+        .filter(Boolean)
+        .map((result) => ({ title: result.TOC, path: result.path }));
 
       this.setStep(7, {
         status: 'completed',
@@ -821,6 +874,7 @@ export class MultiStepReasoningService {
       };
 
       this.lastClassifiedResults = classifiedResults;
+      this.lastIgnoreChapters = [];
     }
 
     // Step 6b: Classify final answer pattern(s)
@@ -987,6 +1041,26 @@ export class MultiStepReasoningService {
       }
       combinedContext += `---\n`;
     }
+
+    combinedContext += `CHAPTER_CLASSIFICATION_JSON: ${JSON.stringify(
+      {
+        main: chapterRefs
+          .filter((ref) => ref.is_main)
+          .map((ref) => ({ ref_id: ref.ref_id, title: ref.title })),
+        sub: chapterRefs
+          .filter((ref) => !ref.is_main && !ref.is_connector)
+          .map((ref) => ({ ref_id: ref.ref_id, title: ref.title })),
+        connector: chapterRefs
+          .filter((ref) => ref.is_connector)
+          .map((ref) => ({ ref_id: ref.ref_id, title: ref.title })),
+        ignore: this.lastIgnoreChapters.map((chapter) => ({
+          title: chapter.title,
+          path: chapter.path,
+        })),
+      },
+      null,
+      2
+    )}\n---\n`;
 
     if (this.lastMultiError?.isMulti && Array.isArray(this.lastMultiError.codes) && this.lastMultiError.codes.length >= 2) {
       const connectorRefs = chapterRefs.filter((ref) => ref.is_connector);
