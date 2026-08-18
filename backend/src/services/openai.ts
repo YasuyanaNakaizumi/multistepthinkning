@@ -160,10 +160,162 @@ type FinalAnswerAssetLookup = {
   imageByTitle: Map<string, string>;
   imageUrlToBasename: Map<string, string>;
   pdfByTitle: Map<string, string>;
+  pdfLinkTitles: Array<{ label: string; url: string }>;
 };
 
 function normalizeAssetTitle(value: string): string {
   return value.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function sanitizePdfLinkLabel(title: string): string {
+  return String(title || '').replace(/\[/g, '(').replace(/\]/g, ')');
+}
+
+function chapterTitleMatchesReference(chapterTitle: string, reference: string): boolean {
+  const chapter = normalizeAssetTitle(chapterTitle);
+  const ref = normalizeAssetTitle(reference);
+  if (!chapter || !ref) return false;
+  if (chapter === ref) return true;
+  if (chapter.includes(ref) || ref.includes(chapter)) return true;
+  const compact = (value: string) => value.replace(/[^a-z0-9]+/g, '');
+  const compactChapter = compact(chapter);
+  const compactRef = compact(ref);
+  return compactChapter.includes(compactRef) || compactRef.includes(compactChapter);
+}
+
+function addPdfAliases(map: Map<string, string>, title: string, url: string): void {
+  if (!title || !url) return;
+  const variants = new Set<string>([
+    title,
+    sanitizePdfLinkLabel(title),
+    title.replace(/[\[\]]/g, ' '),
+  ]);
+  const codeMatch = title.match(/\b([A-Z]{1,4}\d{2,5})\b/i);
+  if (codeMatch) {
+    variants.add(codeMatch[1]);
+    variants.add(`FAILURE CODE ${codeMatch[1]}`);
+    variants.add(`FAILURE CODE [${codeMatch[1]}]`);
+    variants.add(`FAILURE CODE (${codeMatch[1]})`);
+  }
+  if (/check electric equipment/i.test(title)) {
+    variants.add('Electrical equipment');
+    variants.add('CHECK ELECTRIC EQUIPMENT');
+  }
+  if (/electrical equipment/i.test(title)) {
+    variants.add('CHECK ELECTRIC EQUIPMENT');
+  }
+  for (const variant of variants) {
+    const normalized = normalizeAssetTitle(variant);
+    if (normalized) map.set(normalized, url);
+  }
+}
+
+function findPdfMarkdownLink(
+  text: string,
+  start: number
+): { end: number; title: string; url: string } | null {
+  if (text[start] !== '[') return null;
+  if (start > 0 && text[start - 1] === '!') return null;
+  // Image tokens are [[IMG:...]] — never treat them as PDF links.
+  if (text[start + 1] === '[') return null;
+
+  let depth = 0;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '\n' || ch === '\r') return null;
+    if (i - start > 240) return null;
+    if (ch === '[') {
+      depth += 1;
+      continue;
+    }
+    if (ch !== ']') continue;
+    depth -= 1;
+    if (depth !== 0 || text[i + 1] !== '(') continue;
+
+    const title = text.slice(start + 1, i);
+    if (!title.trim() || /\[\[?\s*IMG\s*:/i.test(title)) return null;
+    const urlOpen = i + 2;
+    if (text[urlOpen] === '<') {
+      const urlClose = text.indexOf('>', urlOpen + 1);
+      if (urlClose < 0 || text[urlClose + 1] !== ')') return null;
+      return { end: urlClose + 2, title, url: text.slice(urlOpen + 1, urlClose) };
+    }
+
+    const urlClose = text.indexOf(')', urlOpen);
+    if (urlClose < 0) return null;
+    return { end: urlClose + 1, title, url: text.slice(urlOpen, urlClose) };
+  }
+  return null;
+}
+
+function skipImageToken(text: string, start: number): number | null {
+  const slice = text.slice(start, start + 12);
+  if (!/^\[\[\s*IMG\s*:/i.test(slice) && !/^\[\s*IMG\s*:/i.test(slice)) return null;
+  const close = text.indexOf(']]', start);
+  if (close < 0) return null;
+  return close + 2;
+}
+
+function rewritePdfMarkdownLinks(
+  text: string,
+  replacer: (title: string, url: string) => string
+): string {
+  let output = '';
+  let index = 0;
+  while (index < text.length) {
+    const open = text.indexOf('[', index);
+    if (open < 0) {
+      output += text.slice(index);
+      break;
+    }
+    output += text.slice(index, open);
+    const imageEnd = skipImageToken(text, open);
+    if (imageEnd != null) {
+      output += text.slice(open, imageEnd);
+      index = imageEnd;
+      continue;
+    }
+    const parsed = findPdfMarkdownLink(text, open);
+    if (!parsed) {
+      output += text[open];
+      index = open + 1;
+      continue;
+    }
+    output += replacer(parsed.title, parsed.url);
+    index = parsed.end;
+  }
+  return output;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function linkifyKnownPdfTitles(
+  answerText: string,
+  pdfByTitle: Map<string, string>,
+  pdfLinkTitles: Array<{ label: string; url: string }>
+): string {
+  const titles = Array.from(
+    new Map(
+      pdfLinkTitles
+        .filter((item) => item.label.trim().length >= 8 && item.url)
+        .map((item) => [item.label.trim(), item.url])
+    ).entries()
+  ).sort((a, b) => b[0].length - a[0].length);
+
+  let rewritten = answerText;
+  for (const [title, mappedUrl] of titles) {
+    const url = pdfByTitle.get(normalizeAssetTitle(title)) || mappedUrl;
+    if (!url) continue;
+    const pattern = new RegExp(`(?<!\\[)${escapeRegExp(title)}(?!\\]\\()`, 'gi');
+    rewritten = rewritten.replace(pattern, (match, offset: number, source: string) => {
+      const before = source.slice(Math.max(0, offset - 2), offset);
+      if (before.endsWith('](') || before.endsWith('[')) return match;
+      return `[${sanitizePdfLinkLabel(match)}](<${url}>)`;
+    });
+  }
+  return rewritten;
 }
 
 function addImageAliases(map: Map<string, string>, title: string, url: string): void {
@@ -200,6 +352,8 @@ function extractFinalAnswerAssetLookup(contextText: string): FinalAnswerAssetLoo
   const imageByTitle = new Map<string, string>();
   const imageUrlToBasename = new Map<string, string>();
   const pdfByTitle = new Map<string, string>();
+  const pdfLinkTitles: Array<{ label: string; url: string }> = [];
+  let pendingPdfTitle = '';
 
   let pendingImageTitle = '';
   let pendingImageBasename = '';
@@ -217,12 +371,32 @@ function extractFinalAnswerAssetLookup(contextText: string): FinalAnswerAssetLoo
     }
   }
 
+  function registerPdf(title: string, url: string): void {
+    if (!title || !url) return;
+    addPdfAliases(pdfByTitle, title, url);
+    pdfLinkTitles.push({ label: title, url });
+    const sanitized = sanitizePdfLinkLabel(title);
+    if (sanitized !== title) pdfLinkTitles.push({ label: sanitized, url });
+  }
+
   for (const rawLine of contextText.split(/\r?\n/)) {
     const line = rawLine.trim();
 
-    const pdfMarkdownMatch = line.match(/^PDF_CITATION_MARKDOWN:\s*\[([^\]]+)\]\(<([^>]+)>\)$/);
+    const pdfTitleMatch = line.match(/^pdf_title:\s*(.+)$/i);
+    if (pdfTitleMatch) {
+      pendingPdfTitle = pdfTitleMatch[1].trim();
+      continue;
+    }
+
+    const pdfUrlMatch = line.match(/^PDF_CITATION_URL:\s*(.+)$/);
+    if (pdfUrlMatch) {
+      registerPdf(pendingPdfTitle, pdfUrlMatch[1].trim());
+      continue;
+    }
+
+    const pdfMarkdownMatch = line.match(/^PDF_CITATION_MARKDOWN:\s*\[(.+)\]\(<([^>]+)>\)$/);
     if (pdfMarkdownMatch) {
-      pdfByTitle.set(normalizeAssetTitle(pdfMarkdownMatch[1]), pdfMarkdownMatch[2]);
+      registerPdf(pdfMarkdownMatch[1].trim(), pdfMarkdownMatch[2].trim());
       continue;
     }
 
@@ -254,7 +428,7 @@ function extractFinalAnswerAssetLookup(contextText: string): FinalAnswerAssetLoo
     }
   }
 
-  return { imageByTitle, imageUrlToBasename, pdfByTitle };
+  return { imageByTitle, imageUrlToBasename, pdfByTitle, pdfLinkTitles };
 }
 
 function rewriteFinalAnswerArtifacts(answerText: string, lookup: FinalAnswerAssetLookup): string {
@@ -289,22 +463,21 @@ function rewriteFinalAnswerArtifacts(answerText: string, lookup: FinalAnswerAsse
     return match;
   });
 
-  rewritten = rewritten.replace(/\[([^\]]+)\]\((<[^>]+>|[^)]+)\)/g, (match, titleRaw, urlRaw) => {
+  rewritten = rewritePdfMarkdownLinks(rewritten, (titleRaw, urlRaw) => {
     const title = String(titleRaw || '').trim();
-    const normalizedTitle = normalizeAssetTitle(title);
-    const canonicalUrl = lookup.pdfByTitle.get(normalizedTitle);
+    const existing = String(urlRaw || '').trim();
+    const canonicalUrl = lookup.pdfByTitle.get(normalizeAssetTitle(title));
     if (!canonicalUrl) {
-      // Drop links that do not correspond to a known Document Ref (e.g., # or localhost).
       return title;
     }
-
-    const url = String(urlRaw || '').trim();
-    const existing = url.startsWith('<') && url.endsWith('>') ? url.slice(1, -1) : url;
+    const label = sanitizePdfLinkLabel(title);
     if (canonicalUrl !== existing) {
-      return `[${title}](<${canonicalUrl}>)`;
+      return `[${label}](<${canonicalUrl}>)`;
     }
-    return match;
+    return `[${label}](<${existing}>)`;
   });
+
+  rewritten = linkifyKnownPdfTitles(rewritten, lookup.pdfByTitle, lookup.pdfLinkTitles);
 
   return removeLinksFromTables(rewritten);
 }
@@ -335,13 +508,19 @@ function extractFinalAnswerArtifacts(answerText: string): FinalAnswerArtifact[] 
     artifacts.push({ type: 'image', title, url });
   }
 
-  const linkRegex = /\[([^\]]+)\]\((<[^>]+>|[^)]+)\)/g;
-  for (const match of answerText.matchAll(linkRegex)) {
-    const title = (match[1] || '').trim();
-    const rawUrl = (match[2] || '').trim();
-    const url = rawUrl.startsWith('<') && rawUrl.endsWith('>') ? rawUrl.slice(1, -1) : rawUrl;
-    if (!url) continue;
-    if (/^https?:\/\//i.test(url) === false) continue;
+  let searchFrom = 0;
+  while (searchFrom < answerText.length) {
+    const open = answerText.indexOf('[', searchFrom);
+    if (open < 0) break;
+    const parsed = findPdfMarkdownLink(answerText, open);
+    if (!parsed) {
+      searchFrom = open + 1;
+      continue;
+    }
+    searchFrom = parsed.end;
+    const title = parsed.title.trim();
+    const url = parsed.url.trim();
+    if (!url || /^https?:\/\//i.test(url) === false) continue;
     if (/\.(jpg|jpeg|png|gif|webp|bmp|svg)(\?|$)/i.test(url)) continue;
     const key = `pdf|${title}|${url}`;
     if (seen.has(key)) continue;
@@ -440,9 +619,11 @@ function buildConnectorSectionPrompt(multiError: { isMulti: boolean; codes?: str
   const codes = Array.isArray(multiError.codes) ? multiError.codes.filter(Boolean) : [];
   const perCodeRule = multiError.isMulti && codes.length >= 2
     ? `
-   - MULTI-CODE: output one connector subsection per error code, "### {CODE}", each with its OWN table in the format above AND its own 3D layout image(s) immediately after that table. Add a "共通のコネクタ" subsection only for connectors the Context explicitly states apply to ALL codes.
+   - MULTI-CODE: output one connector subsection per error code, "### {CODE}", each with its OWN table in the format above AND its own 3D layout image(s) immediately after that table. Add a "共通のコネクタ" subsection only for connectors that appear in MAIN \`context:\` for ALL listed codes.
+   - For each "### {CODE}" table, include only connector numbers that appear in that code's MAIN diagnostic \`context:\` (the chapter body that discusses that code). Do not merge in connectors that belong only to another code.
    - Error codes in this answer: ${codes.join(', ')}.`
-    : '';
+    : `
+   - SINGLE-CODE / non-multi: the table may include only connector numbers that appear in MAIN \`context:\` for the error code(s) or diagnostic procedure being answered.`;
 
   return `
 
@@ -451,7 +632,12 @@ CONNECTOR SECTION (MANDATORY - the Context contains connector information):
    - The table MUST have exactly these 5 columns, in this order, with this exact header. No extra, missing, renamed, reordered, merged, or translated columns:
 | Connector No. | Connector Type | Number of pins | Installation position | Address |
 |---|---|---|---|---|
-   - One row per connector. Fill unknown cells with "不明（提示された資料に記載なし）". Never drop a row just because fields are unknown; if no connector number is identifiable, still output at least one row.
+   - Connector No. source (CRITICAL, applies to both single-code and multi-code answers):
+     - A table row is allowed ONLY if that Connector No. appears in the \`context:\` field (chapter body text) of a MAIN Document Ref that discusses the relevant error code(s) or diagnostic procedure.
+     - FORBIDDEN as a source of Connector No.: \`image_explanation\`, Caption, OCR, label_list, md_anchor_quotes, available_images, 3D layout / location drawings, and callouts printed on diagrams (e.g. an "E12" arrow on a figure).
+     - Do NOT dump every row from a Connector List / Layout catalog. CONNECTOR Document Refs (and their \`context:\` tables) may be used only to fill Type / pins / Installation position / Address for connector numbers already selected from MAIN \`context:\`.
+     - EXTRACTED_CONNECTORS is a hint only. Drop any hinted ID that does not also appear in MAIN \`context:\`.
+   - One row per allowed connector. Fill unknown Type/pins/position/Address cells with "不明（提示された資料に記載なし）". If MAIN \`context:\` names no connector numbers, do not invent rows from images or from the full connector catalog; write "本文にコネクタ番号の記載なし" instead of a fabricated table.
    - Do NOT put links, citations, or images inside the table. Put citations in the text around the table, using ONLY Document Refs labeled (CONNECTOR).
    - IMMEDIATELY after the table, insert the 3D layout diagram image(s) with [[IMG:<file name>]] tokens, one token per line.
      - Use ONLY file names from Document Refs labeled (CONNECTOR); never from error-code or troubleshooting chapters.
@@ -481,12 +667,13 @@ Answer Creation Rules:
 7. Readability: Use Markdown tables for specification values, pin assignments, inspection steps with criteria, and parts lists with torque/clearance. Keep paragraphs short; prefer headings, bullets, and tables over walls of text.
 8. Citations:
    - Cite with the "PDF_CITATION_MARKDOWN" strings from the Context, copied byte-for-byte. Never invent, shorten, or re-encode a URL, and never use "#", "javascript:", or "localhost".
-   - Place one citation at the end of each procedure step or each short paragraph. That granularity is allowed and preferred. Do not cite after every sentence, and do not put a citation on every bullet in a tight list that is still one step.
+   - Place one citation at the end of each procedure step or each short paragraph ONLY when that step's evidence is in that same Document Ref. Do not stamp the enclosing error-code chapter onto a step that is a cross-reference to another chapter.
+   - MULTI-CODE (CRITICAL): Inside "### {CODE}", procedure citations that are not cross-refs MUST be that code's own MAIN PDF_CITATION_MARKDOWN (e.g. FAILURE CODE [CA441] steps cite CA441, never CA144). Never reuse another code's citation in that subsection.
    - Each citation must come from the Document Ref that actually contains the evidence. If a sentence combines several refs, attach one link per ref.
    - If a Document Ref has no PDF_CITATION_MARKDOWN, write its title as plain text.
    - No links inside tables, except a "参照" / "参考" / "Reference" column.
    - Never output raw "[shop-N]" tags, decorative markers ("cite", "★", "☆", "■"), or an image file name as a citation.
-9. Cross-chapter References: When the Context text points to another chapter ("〜を参照", "refer to ...", "see ...", "故障コード[...]"), turn that mention into a link to the matching Document Ref's PDF_CITATION_MARKDOWN. Match by title, one link per mention, and leave it as plain text when no Document Ref matches.
+9. Cross-chapter References: When a MAIN step says "〜を参照", "refer to ...", "see ...", or names another chapter (e.g. CHECKS BEFORE TROUBLESHOOTING, CHECK ELECTRIC EQUIPMENT, RELATED INFORMATION FOR TROUBLESHOOTING), that mention MUST become that chapter's own PDF_CITATION_MARKDOWN. Do NOT replace it with the parent FAILURE CODE chapter link. Match by title (ignore punctuation / extra brackets). If no Document Ref matches, leave the chapter name as plain text.
 10. Images - you MUST NOT write image URLs; the backend inserts them:
     - Insert an image by writing \`[[IMG:<file name>]]\` on its own line, using a file name that literally appears in an "Image:" line or the "available_images" list of the SAME Document Ref.
     - FORBIDDEN: \`![name.jpg](...)\`, \`!name.jpg\`, or a bare \`name.jpg\` as a paragraph. Never invent a file name.
@@ -816,7 +1003,8 @@ ${alreadySearchedJson}
 9. Inspections: If the query is diagnosis/inspection oriented, include prerequisite paths such as pre-diagnostic inspection and electrical inspection when present.
 10. Components: If components are present, include paths that likely describe the location or explanation of those components.
 11. Maintenance (OMM / 取扱説明書): If the query is about maintenance, メンテナンス, periodic maintenance, or 定期点検, and the TOC contains a "Maintenance" or "Periodic Maintenance" section, do NOT stop at the schedule/interval parent path. Also include the child / lower-level paths that describe specific maintenance items, procedures, inspection details, and adjustment/replacement steps under that maintenance tree.
-12. Return JSON only.
+12. Explicit referenced titles: If a search query is itself a chapter title (or a close match to one TOC path), include that exact path. Do not substitute a sibling or parent (e.g. do not replace TEST ENGINE OIL PRESSURE with TEST ENGINE RELATED PARTS).
+13. Return JSON only.
 
 ## Output Format
 {
@@ -914,9 +1102,10 @@ Return a JSON object with all fields:
 * Focus only on the user query: "${userQuery}".
 * Do not invent information that is not explicitly stated in the Document Content.
 * If the provided content is TOC-like or chapter-list-like, prefer extracting chapter titles exactly as they appear instead of rewriting them.
+* When Retrieved Chapter Content contains "see", "refer to", "for details, see", or "〜を参照", extract those destination chapter titles into reference_chapters even if they also appear in the TOC. Do not skip them just because they are mentioned in the already-retrieved body text.
 * error_codes: Extract explicit error or failure codes only when sufficient information about them has not already been found in the Document Content.
-* connectors: Extract explicit connector IDs ONLY when the user query is explicitly about connectors, wiring, error codes, diagnostics, or inspection. Do NOT include connector list/layout or 3D layout diagram chapter names for unrelated queries such as weight, maintenance, assembly/disassembly, or specifications.
-* reference_chapters: Extract chapter or section titles explicitly referenced by phrases such as "see", "refer to", "for details, see", or "〜を参照". Do NOT include connector list/layout or 3D layout diagram chapter(s) here unless the query is about connectors or diagnostics.
+* connectors: Extract explicit connector IDs ONLY when the user query is explicitly about connectors, wiring, error codes, diagnostics, or inspection. Take IDs only from chapter body text (Document Content), never from image captions, OCR, figure callouts, or 3D layout diagram labels. Do NOT include connector list/layout or 3D layout diagram chapter names for unrelated queries such as weight, maintenance, assembly/disassembly, or specifications. Do NOT copy an entire connector catalog.
+* reference_chapters: Extract chapter or section titles explicitly referenced by phrases such as "see", "refer to", "for details, see", or "〜を参照". Include titles such as TEST ENGINE OIL PRESSURE, CHECKS BEFORE TROUBLESHOOTING, and CHECK ELECTRIC EQUIPMENT when they are named as a reference. Do NOT include connector list/layout or 3D layout diagram chapter(s) here unless the query is about connectors or diagnostics.
 * diagnostic_chapters: Extract chapter titles that are explicitly related to troubleshooting, diagnosis, or inspection.
 * components: Extract up to two primary components involved.
 * reasoning: Briefly explain what information is available and what is missing.
@@ -958,13 +1147,15 @@ ${textContext}`,
 
 export async function classifyChapters(
   userQuery: string,
-  chapterList: any[]
+  chapterList: any[],
+  referenceChapters: string[] = []
 ): Promise<ChapterClassification> {
   try {
+    const referencedTitles = referenceChapters.map((title) => String(title || '').trim()).filter(Boolean);
     return await chatJson<ChapterClassification>([
       {
         role: 'system',
-        content: 'You are an expert in classifying technical documents. Prefer IGNORE when a chapter is not clearly relevant to the user question.',
+        content: 'You are an expert in classifying technical documents. Prefer IGNORE when a chapter is not clearly relevant to the user question, except for explicitly referenced chapters and connector-related chapters.',
       },
       {
         role: 'user',
@@ -974,26 +1165,32 @@ User Question
 
 ${userQuery}
 
+Explicitly referenced chapters (from MAIN text "see" / "refer to" / "〜を参照")
+These MUST be SUB (or MAIN if they directly answer the question). Never IGNORE them to make room for other chapters.
+Match loosely: "Electrical equipment" matches CHECK ELECTRIC EQUIPMENT; "CHECKS BEFORE TROUBLESHOOTING" matches that TOC title.
+
+${JSON.stringify(referencedTitles, null, 2)}
+
 Chapter List
 
 ${JSON.stringify(chapterList, null, 2)}
 
 Categories
 MAIN: Chapters containing direct answers, procedures, specifications, locations, or keywords from the user question.
-SUB: Chapters that support, explain, or are explicitly referenced by MAIN chapters. Maximum 5 chapters.
-CONNECTOR: Relevant connector lists, connector tables, wiring/layout diagrams, or connector location chapters. Use only when connector relevance is explicit.
+SUB: Chapters that support, explain, or are explicitly referenced by MAIN chapters. Maximum 10 chapters. Fill SUB first with explicitly referenced chapters, then other supporting chapters.
+CONNECTOR: Relevant connector lists, connector tables, wiring/layout diagrams, or connector location chapters. Use only when connector relevance is explicit. Prefer CONNECTOR LIST AND LAYOUT and 3D layout / location chapters over generic circuit diagrams when slots are limited.
 IGNORE: Chapters unrelated to the user question or only loosely related.
 Rules
 Classify chapters that directly answer "how", "where", or specification questions as MAIN.
 Chapters containing error codes, component names, or other keywords from the user question should be MAIN only when they clearly help answer the user question.
 If multiple chapters contain the same information, classify the most detailed one as MAIN.
-Any chapter explicitly referenced by another relevant chapter must be at least SUB.
+Any chapter explicitly referenced by another relevant chapter, or listed in Explicitly referenced chapters, must be at least SUB. Do not drop them because SUB is full — drop loosely related chapters instead.
 Use chapter content, image_captions, and image_ocr_texts as classification evidence.
 Treat IDs such as E08, J1, or VE03 as connector IDs when relevant.
 When connectors are relevant, include the applicable connector list/table and corresponding layout or location chapters in CONNECTOR.
 If related connector layout chapters are numbered, such as "(1)", "(2)", and "(3)", include all available entries in the series.
 If none of the chapters clearly match the user question, put all chapters into IGNORE rather than forcing them into MAIN, SUB, or CONNECTOR.
-If a chapter is not clearly useful for the answer, choose IGNORE.
+If a chapter is not clearly useful for the answer, choose IGNORE — except explicitly referenced chapters and connector list/layout chapters.
 Every chapter index must appear in exactly one category.
 Output Format
 
@@ -1137,8 +1334,8 @@ MULTIPLE ERROR CODES (MANDATORY STRUCTURE):
    - Use exactly these section headings, in this order:
      1) ${headings.summary} — list all error codes and what they share.
      2) ${headings.commonInspection} — items that apply to ALL codes. Table: ${useJapanese ? '項目 | 手順 | 判定基準 | 参考' : 'Item | Procedure | Criteria | Reference'}.
-     3) ${headings.perCodeDiagnosis} — one "### {CODE}" subsection per code, each as detailed as a single-code answer (full steps, criteria, values, citations).
-     4) ${headings.commonConnectors} — connectors the Context states apply to ALL codes (see the CONNECTOR SECTION rules for the table and images).
+     3) ${headings.perCodeDiagnosis} — one "### {CODE}" subsection per code, each as detailed as a single-code answer (full steps, criteria, values). Citations in that subsection must be that code's MAIN PDF except when a step cross-references another chapter, in which case use that chapter's PDF_CITATION_MARKDOWN.
+     4) ${headings.commonConnectors} — only connector numbers that appear in MAIN \`context:\` for ALL codes. Never take extra IDs from image Caption/OCR or from a full connector-list catalog (see the CONNECTOR SECTION rules).
      5) ${headings.perCodeConnectors} — one "### {CODE}" subsection per code that has a MULTI_ERROR_CONNECTOR_<CODE> block, each with its own connector table AND its own 3D layout image(s) right after the table.
      6) ${headings.commonComponents} — table: ${useJapanese ? '部品 | 役割 | 備考 | 参考' : 'Component | Role | Notes | Reference'}.
      7) ${headings.perCodeComponents} — only when distinct from the common ones.
@@ -1220,8 +1417,9 @@ function renderImageReferences(answerText: string, imageSasUrlMap?: Map<string, 
 
   let rendered = answerText;
 
-  // 1. Canonical token emitted by the model.
+  // 1. Canonical token, plus broken leftovers like [IMG:file.jpg]] after a PDF-link rewrite.
   rendered = rendered.replace(/\[\[\s*IMG\s*:\s*([^\]]+?)\s*\]\]/gi, (_m, name) => toMarkdown(String(name), ''));
+  rendered = rendered.replace(/\[\s*IMG\s*:\s*([^\]]+?)\s*\]\]?/gi, (_m, name) => toMarkdown(String(name), ''));
 
   // 2. Markdown images the model produced anyway - re-point them at the real URL.
   rendered = rendered.replace(/!\[([^\]]*)\]\(([^)]*)\)/g, (match, alt, url) => {

@@ -49,7 +49,12 @@ router.post('/api/chat/stream', async (req: Request, res: Response) => {
         ? selectedDocuments.map((d: any) => d.documentNumber)
         : rawPdfs) || [];
 
+    console.log(
+      `[Chat] stream received: docs=${selectedPdfs.length} query="${String(query || '').slice(0, 80)}"`
+    );
+
     if (!query || selectedPdfs.length === 0) {
+      console.log('[Chat] rejected: missing query or selected documents');
       return res.status(400).json({ error: 'Missing required fields: query, selectedPdfs or selectedDocuments' });
     }
 

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { Button } from './components/ui/button';
 import { ChatMessage } from './components/ChatMessage';
 import { ThinkingProcess } from './components/ThinkingProcess';
@@ -60,6 +61,94 @@ function truncateText(value: string, maxLength: number): string {
 function formatSelectedDocument(label: string, doc: Document, maxTitleLength = 22): string {
   const title = truncateText(doc.documentTitle || doc.documentNumber, maxTitleLength);
   return `${label}: ${title} (${doc.documentNumber})`;
+}
+
+function TruncatedWithTooltip({
+  text,
+  className,
+}: {
+  text: string;
+  className?: string;
+}) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const [open, setOpen] = useState(false);
+  const [truncated, setTruncated] = useState(false);
+  const [pos, setPos] = useState({ top: 0, left: 0 });
+  const pressTimer = useRef<number | null>(null);
+  const hideTimer = useRef<number | null>(null);
+
+  const measure = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    setTruncated(el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1);
+  }, []);
+
+  useEffect(() => {
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, [text, measure]);
+
+  const show = () => {
+    if (!truncated) return;
+    const el = ref.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const maxLeft = window.innerWidth - 16;
+    setPos({
+      top: rect.bottom + 6,
+      left: Math.min(rect.left, Math.max(8, maxLeft - Math.min(rect.width, window.innerWidth * 0.9))),
+    });
+    setOpen(true);
+  };
+
+  const hide = () => setOpen(false);
+
+  const clearTimers = () => {
+    if (pressTimer.current) {
+      window.clearTimeout(pressTimer.current);
+      pressTimer.current = null;
+    }
+    if (hideTimer.current) {
+      window.clearTimeout(hideTimer.current);
+      hideTimer.current = null;
+    }
+  };
+
+  return (
+    <>
+      <span
+        ref={ref}
+        className={className}
+        title={truncated ? text : undefined}
+        onMouseEnter={show}
+        onMouseLeave={hide}
+        onTouchStart={() => {
+          if (!truncated) return;
+          clearTimers();
+          pressTimer.current = window.setTimeout(show, 350);
+        }}
+        onTouchEnd={() => {
+          clearTimers();
+          hideTimer.current = window.setTimeout(hide, 1600);
+        }}
+        onTouchCancel={clearTimers}
+      >
+        {text}
+      </span>
+      {open && truncated &&
+        createPortal(
+          <span
+            className="pointer-events-none fixed z-[80] max-w-[min(90vw,28rem)] rounded-md bg-neutral-900 px-2.5 py-1.5 text-[11px] leading-snug text-white shadow-lg"
+            style={{ top: pos.top, left: pos.left }}
+            role="tooltip"
+          >
+            {text}
+          </span>,
+          document.body
+        )}
+    </>
+  );
 }
 
 function formatModelSerial(doc: Document, fallbackModel?: string, fallbackSerial?: string): string | undefined {
@@ -1010,7 +1099,7 @@ function DocumentSetupModal({
     <div className="fixed inset-0 z-40 flex items-end sm:items-center justify-center p-0 sm:p-4">
       <div className="absolute inset-0 bg-neutral-900/40 backdrop-blur-[2px]" onClick={onClose} />
       <div
-        className="relative w-full sm:max-w-3xl h-[var(--app-height,100dvh)] sm:h-auto sm:max-h-[min(88vh,var(--app-height,88vh))] bg-white sm:rounded-2xl shadow-2xl flex flex-col overflow-hidden"
+        className="relative w-full sm:max-w-6xl lg:max-w-7xl h-[var(--app-height,100dvh)] sm:h-auto sm:max-h-[min(88vh,var(--app-height,88vh))] bg-white sm:rounded-2xl shadow-2xl flex flex-col overflow-hidden"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-labelledby="doc-setup-title"
@@ -1179,23 +1268,28 @@ function DocRow({
           <Check className="h-3 w-3" />
         </span>
         <span className="flex-1 min-w-0">
-          <span className="flex items-center gap-1.5">
-            <span className="block font-medium truncate">{label}</span>
+          <span className="flex items-start gap-1.5">
+            <TruncatedWithTooltip
+              text={label}
+              className="block flex-1 min-w-0 font-medium line-clamp-2 break-words"
+            />
             {meta && (
-              <span className={`text-[10px] px-1.5 py-0.5 rounded-full shrink-0 ${active ? 'bg-neutral-700 text-neutral-200' : 'bg-neutral-100 text-neutral-500'}`}>
+              <span className={`text-[10px] px-1.5 py-0.5 rounded-full shrink-0 mt-0.5 ${active ? 'bg-neutral-700 text-neutral-200' : 'bg-neutral-100 text-neutral-500'}`}>
                 {meta}
               </span>
             )}
           </span>
           {sub && (
-            <span className={`block text-[11px] truncate ${active ? 'text-neutral-300' : 'text-neutral-500'}`}>
-              {sub}
-            </span>
+            <TruncatedWithTooltip
+              text={sub}
+              className={`block text-[11px] truncate ${active ? 'text-neutral-300' : 'text-neutral-500'}`}
+            />
           )}
           {detail && (
-            <span className={`block text-[11px] truncate ${active ? 'text-neutral-400' : 'text-neutral-400'}`}>
-              {detail}
-            </span>
+            <TruncatedWithTooltip
+              text={detail}
+              className={`block text-[11px] truncate ${active ? 'text-neutral-400' : 'text-neutral-400'}`}
+            />
           )}
         </span>
       </button>

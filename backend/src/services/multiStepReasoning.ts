@@ -605,7 +605,14 @@ export class MultiStepReasoningService {
       if (!extractTocContent) {
         extractTocContent = loadTOCMarkdown(selectedPdfs) || '';
       }
-      const textContext = extractTocContent || initialResults.map(r => r.content).join('\n\n');
+      const retrievedChapterBodies = initialResults
+        .map((result) => `Chapter: ${result.TOC || result.path || ''}\n${result.content || ''}`)
+        .filter((block) => block.trim().length > 0)
+        .join('\n\n');
+      const textContext = [
+        retrievedChapterBodies ? `## Retrieved Chapter Content\n${retrievedChapterBodies}` : '',
+        extractTocContent ? `## Table of Contents\n${extractTocContent}` : '',
+      ].filter(Boolean).join('\n\n');
       elements = await extractElements(query, textContext, chatHistory);
       logStep(
         '5 extracted elements',
@@ -683,15 +690,18 @@ export class MultiStepReasoningService {
         const components: string[] = elements.components || [];
 
         const normalizedQuery = query.toLowerCase();
-        const initialSearchText = initialResults
-          .map((r) => `${r.TOC}\n${r.content}`)
-          .join('\n\n')
+        const alreadyRetrievedChapterText = initialResults
+          .map((result) => `${result.TOC || ''}\n${result.path || ''}`)
+          .join('\n')
           .toLowerCase();
 
         const shouldKeepTerm = (term: string) => {
           const normalizedTerm = term.trim().toLowerCase();
           if (!normalizedTerm) return false;
-          return !normalizedQuery.includes(normalizedTerm) && !initialSearchText.includes(normalizedTerm);
+          if (normalizedQuery.includes(normalizedTerm)) return false;
+          // A mention inside retrieved BODY text is not enough: the referenced chapter
+          // itself may still be missing. Only skip terms that match an already retrieved TOC/path.
+          return !alreadyRetrievedChapterText.includes(normalizedTerm);
         };
 
         const filteredErrorCodes = Array.from(new Set(errorCodes))
@@ -839,12 +849,66 @@ export class MultiStepReasoningService {
         image_ocr_texts: extractImageOcrTexts(r.image_content),
       }));
 
-      const classification = await classifyChapters(query, chapterList);
-      
+      const classification = await classifyChapters(
+        query,
+        chapterList,
+        [...(elements.reference_chapters || []), ...(elements.diagnostic_chapters || [])]
+      );
+
+      const referenceHints = [
+        ...(elements.reference_chapters || []),
+        ...(elements.diagnostic_chapters || []),
+        'CHECK ELECTRIC EQUIPMENT',
+        'CHECKS BEFORE TROUBLESHOOTING',
+        'Electrical equipment',
+      ].map((title) => String(title || '').trim()).filter(Boolean);
+
+      const normalizeTitleKey = (value: string) =>
+        String(value || '')
+          .toLowerCase()
+          .replace(/electrical\s+equipment/g, 'electric equipment')
+          .replace(/[^a-z0-9]+/g, '');
+      const matchesReferencedChapter = (toc: string) => {
+        const key = normalizeTitleKey(toc);
+        if (!key) return false;
+        return referenceHints.some((hint) => {
+          const hintKey = normalizeTitleKey(hint);
+          return hintKey.length >= 4 && (key.includes(hintKey) || hintKey.includes(key));
+        });
+      };
+      const isConnectorPriorityChapter = (toc: string) =>
+        /connector list|connector layout|connector location|立体配置|3d layout/i.test(toc);
+
+      const used = new Set<number>([
+        ...(classification.main || []),
+        ...(classification.connector || []),
+        ...(classification.sub || []),
+      ]);
+      const promotedSub: number[] = [];
+      const promotedConnector: number[] = [];
+      uniqueResults.forEach((result, index) => {
+        if (used.has(index)) return;
+        if (isConnectorPriorityChapter(result.TOC)) {
+          promotedConnector.push(index);
+          used.add(index);
+          return;
+        }
+        if (matchesReferencedChapter(result.TOC)) {
+          promotedSub.push(index);
+          used.add(index);
+        }
+      });
+
+      const subIndexes = Array.from(new Set([...promotedSub, ...(classification.sub || [])])).slice(0, 10);
+      const connectorIndexes = Array.from(new Set([...(classification.connector || []), ...promotedConnector]));
+      const mainIndexes = classification.main || [];
+      const assigned = new Set([...mainIndexes, ...connectorIndexes, ...subIndexes]);
+      const ignoreIndexes = uniqueResults.map((_, index) => index).filter((index) => !assigned.has(index));
+
       classifiedResults = {
-        main: uniqueResults.filter((_, i) => classification.main.includes(i)),
-        connector: uniqueResults.filter((_, i) => classification.connector.includes(i)),
-        sub: uniqueResults.filter((_, i) => classification.sub.includes(i)),
+        main: uniqueResults.filter((_, i) => mainIndexes.includes(i)),
+        connector: uniqueResults.filter((_, i) => connectorIndexes.includes(i)),
+        sub: uniqueResults.filter((_, i) => subIndexes.includes(i)),
       };
 
       logStep('8 chapter classification', `MAIN=${classifiedResults.main.length} CONNECTOR=${classifiedResults.connector.length} SUB=${classifiedResults.sub.length} IGNORE=${(classification.ignore || []).length}`);
@@ -855,7 +919,7 @@ export class MultiStepReasoningService {
       logStep('8 SUB', shortList(classifiedResults.sub.map((r) => r.TOC)));
 
       this.lastClassifiedResults = classifiedResults;
-      this.lastIgnoreChapters = (classification.ignore || [])
+      this.lastIgnoreChapters = ignoreIndexes
         .map((index) => uniqueResults[index])
         .filter(Boolean)
         .map((result) => ({ title: result.TOC, path: result.path }));
@@ -979,7 +1043,7 @@ export class MultiStepReasoningService {
       if (pdfBlobPath) {
         const sasPdfUrl = await createSasUrl(pdfBlobPath);
         // Use angle brackets to keep markdown links valid even when URL contains ')'
-        this.refLinkMap.set(refId, `[${result.TOC}](<${sasPdfUrl}>)`);
+        this.refLinkMap.set(refId, `[${result.TOC.replace(/\[/g, '(').replace(/\]/g, ')')}](<${sasPdfUrl}>)`);
         this.refPdfUrlMap.set(refId, sasPdfUrl);
         this.pdfUrls.push({ title: result.TOC, url: sasPdfUrl });
         debugUrls.pdfCitationUrls.push({ refId, title: result.TOC, url: sasPdfUrl });
@@ -1090,10 +1154,10 @@ export class MultiStepReasoningService {
       if (citationUrl) {
         // PDF-only citation URL. IMPORTANT: must NOT be used for images.
         combinedContext += `PDF_CITATION_URL: ${citationUrl}\n`;
-        combinedContext += `PDF_CITATION_MARKDOWN: [${ref.title}](<${citationUrl}>)\n`;
+        combinedContext += `PDF_CITATION_MARKDOWN: [${ref.title.replace(/\[/g, '(').replace(/\]/g, ')')}](<${citationUrl}>)\n`;
       }
       combinedContext += `chunk_info: pages ${result.start_page}-${result.end_page}\n`;
-      combinedContext += `context: ${result.content}\n`;
+      combinedContext += `context (chapter body text; connector table Connector No. must come from MAIN context, not from image_explanation): ${result.content}\n`;
 
       if (result.image_content) {
         const explanations = flattenImageExplanations(result.image_content);

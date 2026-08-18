@@ -282,9 +282,10 @@ Document Excerpts:
 * Focus only on the user query: "{{userQuery}}".
 * Do not invent information that is not explicitly stated in the Document Content.
 * If the provided content is TOC-like or chapter-list-like, prefer extracting chapter titles exactly as they appear instead of rewriting them.
+* When Retrieved Chapter Content contains "see" / "refer to" / "〜を参照", extract those destination titles into reference_chapters even if they also appear in the TOC or in already-retrieved body text.
 * error_codes: Extract explicit error or failure codes only when sufficient information about them has not already been found in the Document Content.
-* connectors: Extract explicit connector IDs ONLY when the user query is explicitly about connectors, wiring, error codes, diagnostics, or inspection.
-* reference_chapters: Extract chapter or section titles explicitly referenced by "see" / "refer to" / "〜を参照".
+* connectors: Extract explicit connector IDs ONLY when the user query is explicitly about connectors, wiring, error codes, diagnostics, or inspection. Take IDs only from chapter body text (Document Content), never from image captions, OCR, figure callouts, or 3D layout diagram labels. Do NOT copy an entire connector catalog.
+* reference_chapters: Extract chapter or section titles explicitly referenced by "see" / "refer to" / "〜を参照" (e.g. TEST ENGINE OIL PRESSURE, CHECKS BEFORE TROUBLESHOOTING, Electrical equipment / CHECK ELECTRIC EQUIPMENT).
 * diagnostic_chapters: Extract chapter titles related to troubleshooting, diagnosis, or inspection.
 * components: Extract up to two primary components involved.
 * reasoning: Briefly explain what information is available and what is missing.
@@ -299,8 +300,12 @@ Return JSON only.`,
 Chat History:
 {{chatHistory.slice(-4)}}
 
-Document Content / TOC:
-{{textContext}}`
+Document Content:
+## Retrieved Chapter Content
+{{initial search chapter bodies: TOC + content}}
+
+## Table of Contents
+{{textContext TOC}}`
       },
       multi: {
         title: "6. Multiple error-code detection",
@@ -353,7 +358,8 @@ Do NOT select the same items again. Extract ONLY the additional TOC paths that s
 9. Inspections: include pre-diagnostic inspection and electrical inspection when present.
 10. Components: include location / explanation paths.
 11. Maintenance: include child item/procedure paths, not only the schedule parent.
-12. Return JSON only.
+12. Explicit referenced titles: if a search query is a chapter title, include that exact path. Do not substitute a sibling (e.g. do not replace TEST ENGINE OIL PRESSURE with TEST ENGINE RELATED PARTS).
+13. Return JSON only.
 
 ## Output Format
 { "chapters": ["XXXXXXXXXXXXX", "XXXXXXXXXX"] }
@@ -370,27 +376,31 @@ Do NOT select the same items again. Extract ONLY the additional TOC paths that s
       classify: {
         title: "8. Chapter classification",
         fn: "classifyChapters",
-        system: "You are an expert in classifying technical documents. Prefer IGNORE when a chapter is not clearly relevant to the user question.",
+        system: "You are an expert in classifying technical documents. Prefer IGNORE when a chapter is not clearly relevant, except explicitly referenced chapters and connector-related chapters.",
         user: `Classify each chapter based on how useful it is for answering the user's question.
 
 User Question
 {{userQuery}}
+
+Explicitly referenced chapters (MUST be SUB or MAIN, never IGNORE)
+{{reference_chapters + diagnostic_chapters JSON}}
+Match loosely: "Electrical equipment" → CHECK ELECTRIC EQUIPMENT.
 
 Chapter List
 {{JSON.stringify(chapterList, null, 2)}}
 
 Categories
 MAIN: direct answers, procedures, specifications, locations, or keywords.
-SUB: support / explicitly referenced by MAIN. Maximum 5.
-CONNECTOR: connector lists, tables, wiring/layout, location chapters. Only when connector relevance is explicit.
-IGNORE: unrelated or only loosely related.
+SUB: support / explicitly referenced by MAIN. Maximum 10. Fill referenced chapters first, then other supporting chapters.
+CONNECTOR: connector lists, tables, layout/location. Prefer CONNECTOR LIST AND LAYOUT over generic circuit diagrams.
+IGNORE: unrelated. Body text of IGNORE is NOT sent to the final-answer GPT (titles only in CHAPTER_CLASSIFICATION_JSON).
 
 Rules
 - "how" / "where" / specification → MAIN
 - If multiple chapters contain the same information, the most detailed one is MAIN
-- Referenced chapters must be at least SUB
+- Referenced chapters and connector list/layout must not be dropped to make room for weaker chapters
+- Backend also promotes referenced / connector-priority chapters if GPT still marked them IGNORE
 - Use chapter content, image_captions, and image_ocr_texts
-- If none clearly match, put all into IGNORE
 - Every chapter index must appear in exactly one category
 
 Output JSON only:
@@ -449,11 +459,11 @@ Answer Creation Rules:
 5b. Document Ref roles (follow CHAPTER_CLASSIFICATION_JSON):
    - MAIN: write the answer body from these refs.
    - SUB: do not write SUB prose/tables/images; display only PDF_CITATION_MARKDOWN.
-   - CONNECTOR: you MAY write connector information in the answer body. CONNECTOR is not treated like SUB.
+   - CONNECTOR: you MAY write connector information in the answer body. CONNECTOR is not treated like SUB. Table Connector No. must come from MAIN context: (chapter body), never from image_explanation / Caption / OCR / diagram callouts.
 6. Structure: Natural headings matching the question and Context.
 7. Readability: Prefer headings, bullets, and Markdown tables.
-8. Citations: Copy PDF_CITATION_MARKDOWN byte-for-byte. Place one link at the end of each procedure step or short paragraph. No invented URLs.
-9. Cross-chapter References: Turn "〜を参照" / "see ..." into the matching Document Ref link.
+8. Citations: Copy PDF_CITATION_MARKDOWN byte-for-byte. In ### {CODE}, cite that code's MAIN PDF only. A cross-reference step must use the referenced chapter's PDF, not the parent FAILURE CODE link.
+9. Cross-chapter References: Turn "〜を参照" / "see ..." / CHECKS BEFORE TROUBLESHOOTING / CHECK ELECTRIC EQUIPMENT into that chapter's PDF_CITATION_MARKDOWN.
 10. Images: insert [[IMG:<file name>]] on its own line. Backend replaces with SAS URLs. Never write raw image URLs.
 11. Required Tools: "## Required Tools" table when tools appear.
 
@@ -474,7 +484,7 @@ stream: true`,
           { title: "ANSWER MODE - Multiple Fault Codes (when patterns includes multi_fault or is_multi_error_codes)", body: "Common suspected components first, then each error code in its own ### {CODE} subsection.\nNever infer commonality across codes unless Context says it applies to ALL codes." },
           { title: "ANSWER MODE - Periodic Maintenance (when patterns includes maintenance)", body: "Never answer with only a list of items. For each item give procedure, warnings, tools, and torque/clearance values." },
           { title: "ANSWER MODE - Manual Integration (when both shop and OMM evidence exist)", body: "Synthesize one integrated answer instead of separate per-source sections." },
-          { title: "CONNECTOR SECTION (when Context has EXTRACTED_CONNECTORS or (CONNECTOR))", body: "Always output ## Related Connector Information just before Required Tools.\n5-column table: Connector No. | Connector Type | Number of pins | Installation position | Address\nImmediately after the table, insert 3D layout diagrams with [[IMG:...]]." }
+          { title: "CONNECTOR SECTION (when Context has EXTRACTED_CONNECTORS or (CONNECTOR))", body: "Always output ## Related Connector Information just before Required Tools.\n5-column table: Connector No. | Connector Type | Number of pins | Installation position | Address\nConnector No. must appear in MAIN context: (diagnostic body text). Same rule for single-code and multi-code. Forbidden sources: image_explanation, Caption, OCR, diagram callouts. Do not dump the Connector List catalog; use it only to fill Type / pins / position / Address. If MAIN context has no IDs, write that none were found in the body text.\nImmediately after the table, insert 3D layout diagrams with [[IMG:...]] for the numbers already in the table." }
         ]
       }
     };
