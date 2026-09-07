@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 """Filter Azure AI Search by TOC title and document number.
 
-Example:
-    python scripts/azure_search_toc_filter.py \
-        --toc "Failure Code [CA441]" \
+Examples:
+    python scripts/azure_search_toc_filter.py \\
+        --toc "Failure Code [CA441]" \\
         --document SEN06496-04
+
+    python scripts/azure_search_toc_filter.py \\
+        --toc "Connector list and layout" \\
+        --document SEN06867-12
+
+The second example prints the Connector list and layout chapter(s) for
+SEN06867-12 as JSON (includes content, image_content, same_page_paths).
+Redirect to a file with:  > connector-list.json
 """
 import argparse
 import json

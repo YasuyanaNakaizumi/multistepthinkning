@@ -1,13 +1,13 @@
 import { 
-  generateSearchQueries, 
+  generateSearchQueriesAndInitialToc,
   selectTOCChapters,
-  selectTOCChaptersInitial,
   judgeAnswerability, 
   extractElements, 
-  detectMultiErrorCodes,
   classifyChapters,
   classifyAnswerPatterns,
-  streamFinalAnswer 
+  streamFinalAnswer,
+  CHAT_REASONING_EFFORT,
+  FINAL_ANSWER_REASONING_EFFORT,
 } from './openai';
 import { searchByTOCFilter, searchByTOCTitleFilter, hybridSearch } from './azureSearch';
 import { createSasUrl, buildDirectBlobUrl, buildTOCPdfBlobName, blobExists, listBlobsByPrefix } from './azureBlob';
@@ -26,20 +26,51 @@ import {
   AnswerPattern
 } from '../types';
 
+async function mapPool<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (true) {
+        const index = next++;
+        if (index >= items.length) return;
+        results[index] = await fn(items[index], index);
+      }
+    })
+  );
+  return results;
+}
+
 async function loadTOCsFromCosmos(documentNumbers: string[]): Promise<{ content: string; entries: FlatTocEntry[] }> {
+  const uniqueDocNumbers = Array.from(new Set(documentNumbers.map((value) => value.trim()).filter(Boolean)));
+  const loaded = await Promise.all(
+    uniqueDocNumbers.map(async (docNumber) => {
+      try {
+        const docEntries = await fetchTocByDocumentNumber(docNumber);
+        if (docEntries.length === 0) return null;
+        return {
+          entries: docEntries,
+          part: `# ${docNumber}\n${buildTocContent(docEntries)}`,
+        };
+      } catch (error) {
+        console.warn(`Failed to load Cosmos TOC for ${docNumber}:`, (error as Error).message);
+        return null;
+      }
+    })
+  );
+
   const entries: FlatTocEntry[] = [];
   const parts: string[] = [];
-
-  for (const docNumber of documentNumbers) {
-    try {
-      const docEntries = await fetchTocByDocumentNumber(docNumber);
-      if (docEntries.length > 0) {
-        entries.push(...docEntries);
-        parts.push(`# ${docNumber}\n${buildTocContent(docEntries)}`);
-      }
-    } catch (error) {
-      console.warn(`Failed to load Cosmos TOC for ${docNumber}:`, (error as Error).message);
-    }
+  for (const item of loaded) {
+    if (!item) continue;
+    entries.push(...item.entries);
+    parts.push(item.part);
   }
 
   return { content: parts.join('\n\n'), entries };
@@ -70,7 +101,98 @@ function logStep(step: string, detail: string): void {
 }
 
 function normalizeConnectorNo(value: string): string {
-  return value.trim().toUpperCase().replace(/\s+/g, '');
+  return value
+    .trim()
+    .replace(/^["'`]+|["'`]+$/g, '')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, '');
+}
+
+function labelListItems(explanation: any): string[] {
+  const raw = explanation?.label_list;
+  if (Array.isArray(raw)) {
+    return raw.map((item) => String(item ?? ''));
+  }
+  if (typeof raw === 'string' && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.map((item) => String(item ?? ''));
+    } catch {
+      return raw.split(/[,;\n]+/).map((item) => item.trim()).filter(Boolean);
+    }
+  }
+  return [];
+}
+
+function looksLikeErrorCodeToken(id: string): boolean {
+  const normalized = normalizeConnectorNo(id);
+  if (!normalized) return true;
+  // Komatsu-style failure codes such as CA441, AA10NZ.
+  if (/^[A-Z]{2}\d{3}[A-Z0-9]*$/i.test(normalized)) return true;
+  if (/^[A-Z]{2,}\d{4,}$/i.test(normalized)) return true;
+  return false;
+}
+
+/** Pull connector IDs from MAIN chapter body text (not captions/OCR). */
+function extractConnectorIdsFromChapterBody(text: string): string[] {
+  const found = new Set<string>();
+  if (!text) return [];
+
+  const explicitPatterns = [
+    /(?:connector\s*(?:no\.?|number)?|コネクタ(?:番号|Ｎｏ\.?|No\.?)?)\s*[:\-]?\s*([A-Z]{1,3}\d{1,4})/gi,
+    /(?:^|\|)\s*([A-Z]{1,2}\d{1,3})\s*\|/gm,
+  ];
+
+  for (const pattern of explicitPatterns) {
+    for (const match of text.matchAll(pattern)) {
+      const id = normalizeConnectorNo(match[1]);
+      if (id && !looksLikeErrorCodeToken(id)) found.add(id);
+    }
+  }
+
+  for (const line of text.split(/\r?\n/)) {
+    if (!/(connector|コネクタ)/i.test(line)) continue;
+    for (const match of line.matchAll(/\b([A-Z]{1,3}\d{1,4})\b/g)) {
+      const id = normalizeConnectorNo(match[1]);
+      if (id && !looksLikeErrorCodeToken(id)) found.add(id);
+    }
+  }
+
+  return Array.from(found);
+}
+
+function mergeConnectorIds(...lists: Array<string[] | undefined>): string[] {
+  return Array.from(
+    new Set(
+      lists
+        .flatMap((list) => list || [])
+        .map((value) => normalizeConnectorNo(String(value)))
+        .filter(Boolean)
+    )
+  );
+}
+
+function isDiagnosticConnectorContext(query: string, elements: any): boolean {
+  const looksLikeFailureCode = /\b[A-Z]{1,3}\d{2,5}\b/.test(query);
+  const looksDiagnostic = /(故障|異常|診断|点検|トラブル|エラー|failure\s*code|fault|diagnos|troubleshoot|inspection|connector|コネクタ|配線|wiring)/i.test(query);
+  return looksDiagnostic
+    || looksLikeFailureCode
+    || (Array.isArray(elements?.error_codes) && elements.error_codes.length > 0)
+    || (Array.isArray(elements?.diagnostic_chapters) && elements.diagnostic_chapters.length > 0);
+}
+
+function enrichExtractedConnectors(
+  query: string,
+  elements: any,
+  mainResults: SearchResult[]
+): string[] {
+  const gptConnectors = mergeConnectorIds(elements?.connectors);
+  if (!isDiagnosticConnectorContext(query, elements)) {
+    return gptConnectors;
+  }
+  const bodyConnectors = mainResults.flatMap((result) => extractConnectorIdsFromChapterBody(result.content || ''));
+  return mergeConnectorIds(gptConnectors, bodyConnectors);
 }
 
 function escapeRegExp(value: string): string {
@@ -81,20 +203,63 @@ function extractConnectorTextFromImageExplanation(explanation: any): string {
   const parts: string[] = [];
   if (typeof explanation?.caption === 'string') parts.push(explanation.caption);
   if (typeof explanation?.ocr_text === 'string') parts.push(explanation.ocr_text);
+  if (typeof explanation?.cropped_image_path === 'string') {
+    parts.push(explanation.cropped_image_path);
+    const basename = explanation.cropped_image_path.split('/').pop();
+    if (basename) parts.push(basename);
+  }
   if (Array.isArray(explanation?.label_list)) parts.push(explanation.label_list.join(' '));
   if (Array.isArray(explanation?.md_anchor_quotes)) parts.push(explanation.md_anchor_quotes.join(' '));
   return parts.join(' ');
+}
+
+function textContainsConnectorNo(text: string, connectorNo: string): boolean {
+  const normalizedConnectorNo = normalizeConnectorNo(connectorNo);
+  if (!normalizedConnectorNo || !text) return false;
+  const pattern = new RegExp(`(^|[^A-Z0-9])${escapeRegExp(normalizedConnectorNo)}($|[^A-Z0-9])`);
+  return pattern.test(String(text).toUpperCase());
+}
+
+function imagePathMatchesConnectorNo(path: string, connectorNo: string): boolean {
+  const normalizedConnectorNo = normalizeConnectorNo(connectorNo);
+  if (!normalizedConnectorNo) return false;
+
+  const normalizedText = normalizeConnectorNo(path.split('/').pop() || path);
+  if (!normalizedText) return false;
+
+  const pattern = new RegExp(`(^|[^A-Z0-9])${escapeRegExp(normalizedConnectorNo)}($|[^A-Z0-9])`);
+  return pattern.test(normalizedText);
+}
+
+function filterImagePathsByConnectorNos(paths: string[], connectorNos: string[]): string[] {
+  const normalizedConnectorNos = Array.from(
+    new Set((connectorNos || []).map((connectorNo) => normalizeConnectorNo(connectorNo)).filter(Boolean))
+  );
+
+  if (normalizedConnectorNos.length === 0) {
+    return paths;
+  }
+
+  return paths.filter((path) =>
+    normalizedConnectorNos.some((connectorNo) => imagePathMatchesConnectorNo(path, connectorNo))
+  );
 }
 
 function imageExplanationMatchesConnectorNo(explanation: any, connectorNo: string): boolean {
   const normalizedConnectorNo = normalizeConnectorNo(connectorNo);
   if (!normalizedConnectorNo) return false;
 
-  const normalizedText = normalizeConnectorNo(extractConnectorTextFromImageExplanation(explanation));
-  if (!normalizedText) return false;
+  const labels = labelListItems(explanation);
+  if (labels.some((label) => normalizeConnectorNo(label) === normalizedConnectorNo)) {
+    return true;
+  }
 
-  const pattern = new RegExp(`(^|[^A-Z0-9])${escapeRegExp(normalizedConnectorNo)}($|[^A-Z0-9])`);
-  return pattern.test(normalizedText);
+  return [
+    explanation?.ocr_text,
+    explanation?.caption,
+    explanation?.cropped_image_path,
+    ...(Array.isArray(explanation?.md_anchor_quotes) ? explanation.md_anchor_quotes : []),
+  ].some((value) => typeof value === 'string' && textContainsConnectorNo(value, normalizedConnectorNo));
 }
 
 function filterImageExplanationsByConnectorNos(explanations: any[], connectorNos: string[]): any[] {
@@ -109,6 +274,15 @@ function filterImageExplanationsByConnectorNos(explanations: any[], connectorNos
   return explanations.filter((explanation) =>
     normalizedConnectorNos.some((connectorNo) => imageExplanationMatchesConnectorNo(explanation, connectorNo))
   );
+}
+
+function selectImageExplanationsForRef(
+  explanations: ImageExplanation[],
+  ref: ChapterRef,
+  connectorNos: string[]
+): ImageExplanation[] {
+  if (!ref.is_connector) return explanations;
+  return filterImageExplanationsByConnectorNos(explanations, connectorNos);
 }
 
 function normalizeContextSearchText(value: string): string {
@@ -139,7 +313,6 @@ function extractConnectorEvidenceText(result: SearchResult): string {
 function buildConnectorSectionForRefs(
   title: string,
   refs: ChapterRef[],
-  refPdfUrlMap: Map<string, string>,
   includeImages: boolean = true
 ): string {
   const lines: string[] = [title];
@@ -150,8 +323,7 @@ function buildConnectorSectionForRefs(
 
   for (const ref of refs) {
     const result = ref.result;
-    const pdfUrl = refPdfUrlMap.get(ref.ref_id) ?? '';
-    lines.push(`- ${ref.ref_id}: ${escapeMarkdownValue(result.TOC)} | ${escapeMarkdownValue(result.documentNumber)} | pages ${result.start_page}-${result.end_page}${pdfUrl ? ` | ${pdfUrl}` : ''}`);
+    lines.push(`- ${ref.ref_id}: ${escapeMarkdownValue(result.TOC)} | ${escapeMarkdownValue(result.documentNumber)} | pages ${result.start_page}-${result.end_page} | [[PDF:${ref.ref_id}]]`);
     if (includeImages && result.image_content) {
       const exps = filterImageExplanationsByConnectorNos(flattenImageExplanations(result.image_content), []);
       for (const exp of exps.slice(0, 5) as ImageExplanation[]) {
@@ -181,33 +353,57 @@ function isOperationAndMaintenanceManualDocument(document: SelectedDocument | un
   return value.includes('operation and maintenance manual') || value.includes('operationandmaintenancemanual');
 }
 
+function slimChatHistory(history: any[] = [], maxAssistantChars = 2500): Array<{ role: string; content: string }> {
+  return (Array.isArray(history) ? history : [])
+    .map((message) => {
+      const role = message?.role === 'assistant' ? 'assistant' : message?.role === 'system' ? 'system' : 'user';
+      let content = String(message?.content || '');
+      content = content.replace(/!\[([^\]]*)\]\([^)]*\)/g, '');
+      content = content.replace(/\[\[\s*IMG\s*:[^\]]+\]\]/gi, '');
+      content = content.replace(/\[([^\]]+)\]\(<https?:[^>]+>\)/g, '$1');
+      content = content.replace(/\[([^\]]+)\]\(https?:[^)]+\)/g, '$1');
+      content = content.replace(/https?:\/\/\S+/g, '');
+      content = content.replace(/\n{3,}/g, '\n\n').trim();
+      if (role === 'assistant' && content.length > maxAssistantChars) {
+        content = `${content.slice(0, maxAssistantChars)}\n…`;
+      }
+      return { role, content };
+    })
+    .filter((message) => message.content.length > 0);
+}
+
 export class MultiStepReasoningService {
   private thinkingSteps: ThinkingStep[] = [];
   private imageUrls: string[] = [];
   private pdfUrls: { title: string; url: string }[] = [];
   private imageSasUrlMap: Map<string, string> = new Map();
+  private imageSasInflight: Map<string, Promise<string>> = new Map();
   private imageDirectoryCache: Map<string, string[]> = new Map();
+  private imageDirectoryInflight: Map<string, Promise<string[]>> = new Map();
+  private cachedToc: { content: string; entries: FlatTocEntry[] } | null = null;
   private refLinkMap: Map<string, string> = new Map();
   private refPdfUrlMap: Map<string, string> = new Map();
   private lastClassifiedResults: ClassifiedResults | null = null;
+  private lastCombinedContext = '';
   private lastIgnoreChapters: { title: string; path?: string }[] = [];
   private lastElements: any = null;
   private lastMultiError: { isMulti: boolean; codes: string[]; reason?: string } = { isMulti: false, codes: [] };
   private lastAnswerPatterns: AnswerPattern[] = ['general'];
   private manualMode = false;
+  private lastMode: 'thinking' | 'fast' = 'thinking';
   private onStepUpdate: ((steps: ThinkingStep[]) => void) | null = null;
 
   private initThinkingSteps() {
     this.thinkingSteps = [
-      { title: 'Generating Search Queries', description: '', status: 'pending', timestamp: new Date().toISOString() },
-      { title: 'Selecting Relevant Paths', description: '', status: 'pending', timestamp: new Date().toISOString() },
+      { title: 'Generating Search Queries + Initial TOC', description: '', status: 'pending', timestamp: new Date().toISOString(), reasoningEffort: CHAT_REASONING_EFFORT },
+      { title: 'Selecting Relevant Paths', description: '', status: 'pending', timestamp: new Date().toISOString(), reasoningEffort: CHAT_REASONING_EFFORT },
       { title: 'Searching by Exact Path Filter', description: '', status: 'pending', timestamp: new Date().toISOString() },
-      { title: 'Judging Answerability', description: '', status: 'pending', timestamp: new Date().toISOString() },
-      { title: 'Extracting Elements', description: '', status: 'pending', timestamp: new Date().toISOString() },
+      { title: 'Judging Answerability', description: '', status: 'pending', timestamp: new Date().toISOString(), reasoningEffort: CHAT_REASONING_EFFORT },
+      { title: 'Extracting Elements + Multi-error', description: '', status: 'pending', timestamp: new Date().toISOString(), reasoningEffort: CHAT_REASONING_EFFORT },
       { title: 'Detecting Multiple Error Codes', description: '', status: 'pending', timestamp: new Date().toISOString() },
-      { title: 'Additional Search', description: '', status: 'pending', timestamp: new Date().toISOString() },
-      { title: 'Chapter Classification', description: '', status: 'pending', timestamp: new Date().toISOString() },
-      { title: 'Classifying Answer Pattern(s)', description: '', status: 'pending', timestamp: new Date().toISOString() },
+      { title: 'Additional Search', description: '', status: 'pending', timestamp: new Date().toISOString(), reasoningEffort: CHAT_REASONING_EFFORT },
+      { title: 'Chapter Classification', description: '', status: 'pending', timestamp: new Date().toISOString(), reasoningEffort: FINAL_ANSWER_REASONING_EFFORT },
+      { title: 'Classifying Answer Pattern(s)', description: '', status: 'pending', timestamp: new Date().toISOString(), reasoningEffort: CHAT_REASONING_EFFORT },
       { title: 'Preparing Context', description: '', status: 'pending', timestamp: new Date().toISOString() },
     ];
 
@@ -243,6 +439,51 @@ export class MultiStepReasoningService {
 
   getPdfUrls(): { title: string; url: string }[] {
     return this.pdfUrls;
+  }
+
+  private async getTocForRequest(selectedPdfs: string[]): Promise<{ content: string; entries: FlatTocEntry[] }> {
+    if (this.cachedToc) return this.cachedToc;
+
+    let cosmosToc: { content: string; entries: FlatTocEntry[] } = { content: '', entries: [] };
+    try {
+      cosmosToc = await loadTOCsFromCosmos(selectedPdfs);
+    } catch (error) {
+      console.warn('Failed to load Cosmos TOC for request:', (error as Error).message);
+    }
+
+    if (cosmosToc.content) {
+      this.cachedToc = cosmosToc;
+      return this.cachedToc;
+    }
+
+    this.cachedToc = {
+      content: loadTOCMarkdown(selectedPdfs) || '',
+      entries: [],
+    };
+    return this.cachedToc;
+  }
+
+  private async listImageBlobsForDir(dir: string): Promise<string[]> {
+    const cached = this.imageDirectoryCache.get(dir);
+    if (cached) return cached;
+
+    const inflight = this.imageDirectoryInflight.get(dir);
+    if (inflight) return inflight;
+
+    const promise = listBlobsByPrefix(`${dir}/`)
+      .then((list) => {
+        const imageList = list.filter((p) => /\.(jpg|jpeg|png|gif|webp)$/i.test(p));
+        this.imageDirectoryCache.set(dir, imageList);
+        this.imageDirectoryInflight.delete(dir);
+        return imageList;
+      })
+      .catch((error) => {
+        this.imageDirectoryInflight.delete(dir);
+        throw error;
+      });
+
+    this.imageDirectoryInflight.set(dir, promise);
+    return promise;
   }
 
   private async findAllImageBlobsForResult(result: SearchResult): Promise<string[]> {
@@ -286,34 +527,8 @@ export class MultiStepReasoningService {
       }
     }
 
-    const allBlobs: string[] = [];
-    for (const dir of dirs) {
-      const cached = this.imageDirectoryCache.get(dir);
-      if (cached) {
-        allBlobs.push(...cached);
-        continue;
-      }
-      const list = await listBlobsByPrefix(`${dir}/`);
-      const imageList = list.filter((p) => /\.(jpg|jpeg|png|gif|webp)$/i.test(p));
-      this.imageDirectoryCache.set(dir, imageList);
-      allBlobs.push(...imageList);
-    }
-
-    // Fallback: if no specific images were found, list the entire document image directory
-    if (allBlobs.length === 0 && documentFolder && baseFile) {
-      const baseDir = `pdfs/processed/${documentFolder}/images/${baseFile}`;
-      const cached = this.imageDirectoryCache.get(baseDir);
-      if (cached) {
-        allBlobs.push(...cached);
-      } else {
-        const list = await listBlobsByPrefix(`${baseDir}/`);
-        const imageList = list.filter((p) => /\.(jpg|jpeg|png|gif|webp)$/i.test(p));
-        this.imageDirectoryCache.set(baseDir, imageList);
-        allBlobs.push(...imageList);
-      }
-    }
-
-    return Array.from(new Set(allBlobs));
+    const listed = await Promise.all(dirs.map((dir) => this.listImageBlobsForDir(dir)));
+    return Array.from(new Set(listed.flat()));
   }
 
   /**
@@ -325,16 +540,34 @@ export class MultiStepReasoningService {
     const fileName = blobPath.split('/').pop() || blobPath;
     const key = fileName.toLowerCase();
     if (this.imageSasUrlMap.has(key)) return fileName;
-    const sasImageUrl = await createSasUrl(blobPath);
-    this.imageSasUrlMap.set(key, sasImageUrl);
-    this.imageUrls.push(sasImageUrl);
-    return fileName;
+
+    const inflight = this.imageSasInflight.get(key);
+    if (inflight) {
+      await inflight;
+      return fileName;
+    }
+
+    const promise = (async () => {
+      const sasImageUrl = await createSasUrl(blobPath);
+      if (!this.imageSasUrlMap.has(key)) {
+        this.imageSasUrlMap.set(key, sasImageUrl);
+        this.imageUrls.push(sasImageUrl);
+      }
+      return fileName;
+    })().finally(() => {
+      this.imageSasInflight.delete(key);
+    });
+
+    this.imageSasInflight.set(key, promise);
+    return promise;
   }
 
   private async resolveContentImageUrl(result: SearchResult, fileName: string): Promise<string | null> {
+    const target = fileName.toLowerCase();
     const allBlobs = await this.findAllImageBlobsForResult(result);
+    const blobSet = new Set(allBlobs.map((path) => path.replace(/›/g, '>')));
     const matched = allBlobs.find(
-      (b) => b.split('/').pop()?.toLowerCase() === fileName.toLowerCase()
+      (b) => b.split('/').pop()?.toLowerCase() === target
     );
     if (matched) return createSasUrl(matched);
 
@@ -342,23 +575,22 @@ export class MultiStepReasoningService {
     const imageContent = (result as any).image_content as any;
     const explanations = flattenImageExplanations(imageContent);
     const existing = (explanations as ImageExplanation[]).find(
-      (e) => e.cropped_image_path && e.cropped_image_path.split('/').pop()?.toLowerCase() === fileName.toLowerCase()
+      (e) => e.cropped_image_path && e.cropped_image_path.split('/').pop()?.toLowerCase() === target
     );
     if (existing?.cropped_image_path) return createSasUrl(existing.cropped_image_path);
 
     const samePagePaths = ((result as any).same_page_paths || []) as string[];
-    const samePageMatch = samePagePaths.find((p) => p.split('/').pop()?.toLowerCase() === fileName.toLowerCase());
+    const samePageMatch = samePagePaths.find((p) => p.split('/').pop()?.toLowerCase() === target);
     if (samePageMatch) return createSasUrl(samePageMatch);
 
-    // Try known image directory directly
+    // Prefer list-cache membership over per-path blobExists round trips.
+    const candidates: string[] = [];
     const knownImagePath = (explanations as ImageExplanation[])[0]?.cropped_image_path;
     if (knownImagePath) {
       const dir = knownImagePath.replace(/›/g, '>').substring(0, knownImagePath.lastIndexOf('/'));
-      const candidate = `${dir}/${fileName}`;
-      if (await blobExists(candidate)) return createSasUrl(candidate);
+      candidates.push(`${dir}/${fileName}`);
     }
 
-    // Try derived chapter/base image directories
     const documentId = (result as any).document_id as string | undefined;
     const documentNumber = (result as any).documentNumber as string | undefined;
     const fileNameField = (result as any).fileName as string | undefined;
@@ -371,23 +603,38 @@ export class MultiStepReasoningService {
         .filter((p): p is string => typeof p === 'string')
         .map((p) => p.replace(/›/g, '>').trim());
       for (const chapterPath of chapterPaths) {
-        const candidate = `pdfs/processed/${documentFolder}/images/${baseFile}/${chapterPath}/${fileName}`;
-        if (await blobExists(candidate)) return createSasUrl(candidate);
+        candidates.push(`pdfs/processed/${documentFolder}/images/${baseFile}/${chapterPath}/${fileName}`);
       }
-      const baseCandidate = `pdfs/processed/${documentFolder}/images/${baseFile}/${fileName}`;
-      if (await blobExists(baseCandidate)) return createSasUrl(baseCandidate);
+      candidates.push(`pdfs/processed/${documentFolder}/images/${baseFile}/${fileName}`);
     }
 
-    return null;
+    const uniqueCandidates = Array.from(new Set(candidates.map((path) => path.replace(/›/g, '>'))));
+    const listedHit = uniqueCandidates.find((candidate) => blobSet.has(candidate));
+    if (listedHit) return createSasUrl(listedHit);
+
+    const existence = await Promise.all(
+      uniqueCandidates.map(async (candidate) => ({ candidate, exists: await blobExists(candidate) }))
+    );
+    const found = existence.find((entry) => entry.exists);
+    return found ? createSasUrl(found.candidate) : null;
   }
 
-  private addThinkingStep(title: string, description: string, status: ThinkingStep['status'] = 'completed') {
+  private addThinkingStep(
+    title: string,
+    description: string,
+    status: ThinkingStep['status'] = 'completed',
+    reasoningEffort?: string
+  ) {
     this.thinkingSteps.push({
       title,
       description,
       status,
       timestamp: new Date().toISOString(),
+      ...(reasoningEffort ? { reasoningEffort } : {}),
     });
+    if (this.onStepUpdate) {
+      this.onStepUpdate(this.thinkingSteps);
+    }
   }
 
   private updateThinkingStep(index: number, status: ThinkingStep['status'], error?: string) {
@@ -396,32 +643,269 @@ export class MultiStepReasoningService {
       if (error) {
         this.thinkingSteps[index].error = error;
       }
+      this.thinkingSteps[index].timestamp = new Date().toISOString();
+      if (this.onStepUpdate) {
+        this.onStepUpdate(this.thinkingSteps);
+      }
     }
+  }
+
+  getAnswerReasoningEffort(): typeof CHAT_REASONING_EFFORT | typeof FINAL_ANSWER_REASONING_EFFORT {
+    return this.lastMode === 'fast' ? CHAT_REASONING_EFFORT : FINAL_ANSWER_REASONING_EFFORT;
   }
 
   async processRequest(request: MultiStepReasoningRequest): Promise<MultiStepReasoningResponse> {
     this.manualMode = Array.isArray(request.selectedDocuments)
       ? request.selectedDocuments.some((document) => isOperationAndMaintenanceManualDocument(document))
       : false;
+    this.lastMode = request.mode === 'fast' ? 'fast' : 'thinking';
     const selectedDocuments = request.selectedDocuments || [];
     const selectedPdfs = request.selectedPdfs ||
       (selectedDocuments.length
         ? selectedDocuments.map((d) => d.documentNumber)
         : []);
+    if (this.lastMode === 'fast') {
+      return this.runFast(request.query, selectedPdfs, selectedDocuments, request.chatHistory ?? []);
+    }
     return this.run(request.query, selectedPdfs, selectedDocuments, request.chatHistory ?? []);
+  }
+
+  private initFastThinkingSteps() {
+    this.thinkingSteps = [
+      { title: 'Selecting TOC Paths', description: '', status: 'pending', timestamp: new Date().toISOString(), reasoningEffort: CHAT_REASONING_EFFORT },
+      { title: 'Retrieving Chapter Text', description: '', status: 'pending', timestamp: new Date().toISOString() },
+      { title: 'Preparing Context', description: '', status: 'pending', timestamp: new Date().toISOString() },
+    ];
+    if (this.onStepUpdate) {
+      this.onStepUpdate(this.thinkingSteps);
+    }
+  }
+
+  /**
+   * Fast mode: TOC path selection → retrieve chapter text → prepare context for answer.
+   * Skips answerability, element extraction, follow-up search, and chapter classification.
+   */
+  async runFast(
+    query: string,
+    selectedPdfs: string[],
+    selectedDocuments: SelectedDocument[] = [],
+    chatHistory: any[] = []
+  ): Promise<MultiStepReasoningResponse> {
+    const requestStartedAt = Date.now();
+    chatHistory = slimChatHistory(chatHistory);
+
+    this.imageUrls = [];
+    this.pdfUrls = [];
+    this.imageSasUrlMap = new Map();
+    this.imageSasInflight = new Map();
+    this.imageDirectoryCache = new Map();
+    this.imageDirectoryInflight = new Map();
+    this.cachedToc = null;
+    this.refLinkMap = new Map();
+    this.refPdfUrlMap = new Map();
+    this.lastClassifiedResults = null;
+    this.lastCombinedContext = '';
+    this.lastIgnoreChapters = [];
+    this.lastElements = null;
+    this.lastMultiError = { isMulti: false, codes: [] };
+    this.lastAnswerPatterns = ['general'];
+    this.manualMode = this.manualMode && selectedPdfs.length > 0;
+    this.initFastThinkingSteps();
+
+    if (!config.azureSearch.endpoint || !config.azureSearch.indexName || !config.azureSearch.apiKey) {
+      this.setStep(1, {
+        status: 'error',
+        description: 'Azure AI Search configuration is missing.',
+        error: 'Missing Azure AI Search configuration',
+      });
+      return {
+        answer: '',
+        thinkingSteps: this.thinkingSteps,
+        imageUrls: [],
+        pdfUrls: [],
+        followupQuestions: [],
+      };
+    }
+
+    const ommDocNumbers = selectedDocuments
+      .filter((d) => isOperationAndMaintenanceManualDocument(d))
+      .map((d) => d.documentNumber);
+    const shopDocNumbers = selectedDocuments.length
+      ? selectedDocuments.filter((d) => !isOperationAndMaintenanceManualDocument(d)).map((d) => d.documentNumber)
+      : selectedPdfs;
+    const hasOmm = ommDocNumbers.length > 0;
+    const hasShop = shopDocNumbers.length > 0;
+
+    const searchTocAcrossIndexes = async (tocTitles: string[], useTitleFilter: boolean): Promise<SearchResult[]> => {
+      const searches: Array<Promise<SearchResult[]>> = [];
+      if (hasShop) {
+        searches.push(
+          useTitleFilter
+            ? searchByTOCTitleFilter(tocTitles, shopDocNumbers, config.azureSearch.indexName)
+            : searchByTOCFilter(tocTitles, shopDocNumbers, config.azureSearch.indexName)
+        );
+      }
+      if (hasOmm) {
+        searches.push(
+          useTitleFilter
+            ? searchByTOCTitleFilter(tocTitles, ommDocNumbers, config.azureSearch.indexNameOmm)
+            : searchByTOCFilter(tocTitles, ommDocNumbers, config.azureSearch.indexNameOmm)
+        );
+      }
+      if (!hasShop && !hasOmm) {
+        searches.push(
+          useTitleFilter
+            ? searchByTOCTitleFilter(tocTitles, selectedPdfs, config.azureSearch.indexName)
+            : searchByTOCFilter(tocTitles, selectedPdfs, config.azureSearch.indexName)
+        );
+      }
+      const batches = await Promise.all(searches);
+      return batches.flat();
+    };
+
+    const hybridAcrossIndexes = async (q: string, top: number): Promise<SearchResult[]> => {
+      const searches: Array<Promise<SearchResult[]>> = [];
+      if (hasShop) {
+        searches.push(hybridSearch(q, shopDocNumbers, top, config.azureSearch.indexName));
+      }
+      if (hasOmm) {
+        searches.push(hybridSearch(q, ommDocNumbers, top, config.azureSearch.indexNameOmm));
+      }
+      if (!hasShop && !hasOmm) {
+        searches.push(hybridSearch(q, selectedPdfs, top, config.azureSearch.indexName));
+      }
+      const batches = await Promise.all(searches);
+      return batches.flat();
+    };
+
+    this.setStep(0, { status: 'in_progress', description: 'Selecting TOC paths for Fast mode' });
+    let tocChapters: string[] = [];
+    let tocEntries: FlatTocEntry[] = [];
+    let queries: string[] = [query];
+    try {
+      const toc = await this.getTocForRequest(selectedPdfs);
+      tocEntries = toc.entries;
+      const plan = await generateSearchQueriesAndInitialToc(query, toc.content, chatHistory);
+      queries = plan.queries.length > 0 ? plan.queries : [query];
+      if (!toc.content) {
+        tocChapters = [];
+        this.setStep(0, { status: 'completed', description: 'No TOC content; will fall back to hybrid search if needed' });
+      } else {
+        tocChapters = tocEntries.length > 0
+          ? keepExactPaths(plan.chapters, tocEntries)
+          : plan.chapters.map((chapter) => chapter.trim()).filter(Boolean);
+        logStep('fast TOC', `${tocChapters.length} path(s) | queries=${shortList(queries)}`);
+        this.setStep(0, {
+          status: 'completed',
+          description:
+            tocChapters.length > 0
+              ? `Selected ${tocChapters.length} TOC path(s): ${tocChapters.slice(0, 8).join(' | ')}${tocChapters.length > 8 ? ' ...' : ''}` +
+                (queries.length > 0 ? `\nQueries: ${queries.slice(0, 3).join(' | ')}${queries.length > 3 ? ' ...' : ''}` : '')
+              : `No TOC paths selected. Queries: ${queries.slice(0, 3).join(' | ') || '(none)'}`,
+        });
+      }
+    } catch (error) {
+      this.setStep(0, { status: 'error', description: 'TOC selection failed', error: (error as Error).message });
+      throw error;
+    }
+
+    this.setStep(1, { status: 'in_progress', description: 'Retrieving chapter text from Azure AI Search' });
+    let results: SearchResult[] = [];
+    let usedHybridFallback = false;
+    try {
+      if (tocChapters.length > 0) {
+        results = await searchTocAcrossIndexes(tocChapters, tocEntries.length > 0);
+      }
+      if (results.length === 0) {
+        usedHybridFallback = true;
+        const hybridBatches = await Promise.all(queries.slice(0, 3).map((q) => hybridAcrossIndexes(q, 5)));
+        const seen = new Set<string>();
+        for (const batch of hybridBatches) {
+          for (const result of batch) {
+            if (!seen.has(result.id)) {
+              seen.add(result.id);
+              results.push(result);
+            }
+          }
+        }
+      }
+      results = results.slice(0, 12);
+      const chapterLabels = results
+        .map((r) => (r.path || r.TOC || '').replace(/\s+/g, ' ').trim())
+        .filter(Boolean);
+      logStep('fast search', `${results.length} hit(s) -> ${shortList(results.map((r) => r.TOC))}`);
+      this.setStep(1, {
+        status: 'completed',
+        description:
+          results.length > 0
+            ? `Retrieved ${results.length} chapter(s)${usedHybridFallback ? ' (hybrid fallback)' : ''}: ` +
+              `${chapterLabels.slice(0, 8).join(' | ')}${chapterLabels.length > 8 ? ' ...' : ''}`
+            : `No chapters retrieved${usedHybridFallback ? ' (hybrid fallback also empty)' : ''}`,
+      });
+    } catch (error) {
+      this.setStep(1, { status: 'error', description: 'Chapter retrieval failed', error: (error as Error).message });
+      results = [];
+    }
+
+    this.setStep(2, { status: 'in_progress', description: 'Preparing Fast answer context' });
+    try {
+      const classifiedResults: ClassifiedResults = {
+        main: results,
+        connector: [],
+        sub: [],
+      };
+      this.lastClassifiedResults = classifiedResults;
+      this.lastAnswerPatterns = ['general'];
+      await this.buildContext(classifiedResults);
+      const contextLabels = results
+        .map((r) => (r.path || r.TOC || '').replace(/\s+/g, ' ').trim())
+        .filter(Boolean);
+      this.setStep(2, {
+        status: 'completed',
+        description:
+          `Context ready (${results.length} chapter(s), ${this.pdfUrls.length} PDF link(s))` +
+          (contextLabels.length > 0
+            ? `\nChapters: ${contextLabels.slice(0, 8).join(' | ')}${contextLabels.length > 8 ? ' ...' : ''}`
+            : ''),
+      });
+    } catch (error) {
+      this.setStep(2, { status: 'error', description: 'Context building failed', error: (error as Error).message });
+    }
+
+    const elapsedMs = Date.now() - requestStartedAt;
+    this.addThinkingStep(
+      'Fast prep finished',
+      `TOC search → context ready in ${elapsedMs}ms. Calling answer model.` +
+        (tocChapters.length > 0
+          ? `\nSelected TOC: ${tocChapters.slice(0, 8).join(' | ')}${tocChapters.length > 8 ? ' ...' : ''}`
+          : '')
+    );
+
+    return {
+      answer: '',
+      thinkingSteps: this.thinkingSteps,
+      imageUrls: this.imageUrls,
+      pdfUrls: this.pdfUrls,
+      followupQuestions: [],
+    };
   }
 
   async run(query: string, selectedPdfs: string[], selectedDocuments: SelectedDocument[] = [], chatHistory: any[] = []): Promise<MultiStepReasoningResponse> {
     const requestStartedAt = Date.now();
+    chatHistory = slimChatHistory(chatHistory);
 
     // Reset per-request state
     this.imageUrls = [];
     this.pdfUrls = [];
     this.imageSasUrlMap = new Map();
+    this.imageSasInflight = new Map();
     this.imageDirectoryCache = new Map();
+    this.imageDirectoryInflight = new Map();
+    this.cachedToc = null;
     this.refLinkMap = new Map();
     this.refPdfUrlMap = new Map();
     this.lastClassifiedResults = null;
+    this.lastCombinedContext = '';
     this.lastIgnoreChapters = [];
     this.lastElements = null;
     this.lastMultiError = { isMulti: false, codes: [] };
@@ -439,40 +923,45 @@ export class MultiStepReasoningService {
     const hasShop = shopDocNumbers.length > 0;
 
     const searchTocAcrossIndexes = async (tocTitles: string[], useTitleFilter: boolean): Promise<SearchResult[]> => {
-      const results: SearchResult[] = [];
+      const searches: Array<Promise<SearchResult[]>> = [];
       if (hasShop) {
-        const shopResults = useTitleFilter
-          ? await searchByTOCTitleFilter(tocTitles, shopDocNumbers, config.azureSearch.indexName)
-          : await searchByTOCFilter(tocTitles, shopDocNumbers, config.azureSearch.indexName);
-        results.push(...shopResults);
+        searches.push(
+          useTitleFilter
+            ? searchByTOCTitleFilter(tocTitles, shopDocNumbers, config.azureSearch.indexName)
+            : searchByTOCFilter(tocTitles, shopDocNumbers, config.azureSearch.indexName)
+        );
       }
       if (hasOmm) {
-        const ommResults = useTitleFilter
-          ? await searchByTOCTitleFilter(tocTitles, ommDocNumbers, config.azureSearch.indexNameOmm)
-          : await searchByTOCFilter(tocTitles, ommDocNumbers, config.azureSearch.indexNameOmm);
-        results.push(...ommResults);
+        searches.push(
+          useTitleFilter
+            ? searchByTOCTitleFilter(tocTitles, ommDocNumbers, config.azureSearch.indexNameOmm)
+            : searchByTOCFilter(tocTitles, ommDocNumbers, config.azureSearch.indexNameOmm)
+        );
       }
       if (!hasShop && !hasOmm) {
-        const fallbackResults = useTitleFilter
-          ? await searchByTOCTitleFilter(tocTitles, selectedPdfs, config.azureSearch.indexName)
-          : await searchByTOCFilter(tocTitles, selectedPdfs, config.azureSearch.indexName);
-        results.push(...fallbackResults);
+        searches.push(
+          useTitleFilter
+            ? searchByTOCTitleFilter(tocTitles, selectedPdfs, config.azureSearch.indexName)
+            : searchByTOCFilter(tocTitles, selectedPdfs, config.azureSearch.indexName)
+        );
       }
-      return results;
+      const batches = await Promise.all(searches);
+      return batches.flat();
     };
 
     const hybridAcrossIndexes = async (q: string, top: number): Promise<SearchResult[]> => {
-      const results: SearchResult[] = [];
+      const searches: Array<Promise<SearchResult[]>> = [];
       if (hasShop) {
-        results.push(...(await hybridSearch(q, shopDocNumbers, top, config.azureSearch.indexName)));
+        searches.push(hybridSearch(q, shopDocNumbers, top, config.azureSearch.indexName));
       }
       if (hasOmm) {
-        results.push(...(await hybridSearch(q, ommDocNumbers, top, config.azureSearch.indexNameOmm)));
+        searches.push(hybridSearch(q, ommDocNumbers, top, config.azureSearch.indexNameOmm));
       }
       if (!hasShop && !hasOmm) {
-        results.push(...(await hybridSearch(q, selectedPdfs, top, config.azureSearch.indexName)));
+        searches.push(hybridSearch(q, selectedPdfs, top, config.azureSearch.indexName));
       }
-      return results;
+      const batches = await Promise.all(searches);
+      return batches.flat();
     };
 
     // Validate config early to avoid confusing runtime errors
@@ -492,43 +981,32 @@ export class MultiStepReasoningService {
       };
     }
 
-    // Step 1: Generate Search Queries
-    this.setStep(0, { status: 'in_progress', description: 'Extracting search queries and identifiers from user query' });
+    // Step 1+2: Generate Search Queries and select initial TOC paths (single GPT call)
+    this.setStep(0, { status: 'in_progress', description: 'Generating search queries and selecting initial TOC paths' });
+    this.setStep(1, { status: 'in_progress', description: 'Loading TOC from Cosmos DB and selecting relevant paths' });
     let queriesResult = { queries: [query], has_codes: false };
+    let tocChapters: string[] = [];
+    let tocEntries: FlatTocEntry[] = [];
     try {
-      queriesResult = await generateSearchQueries(query, chatHistory);
+      const toc = await this.getTocForRequest(selectedPdfs);
+      const tocContent = toc.content;
+      tocEntries = toc.entries;
+
+      const plan = await generateSearchQueriesAndInitialToc(query, tocContent, chatHistory);
+      queriesResult = { queries: plan.queries, has_codes: plan.has_codes };
       logStep('1 search queries', `${queriesResult.queries.length} query(ies) | hasCodes=${queriesResult.has_codes} -> ${shortList(queriesResult.queries)}`);
       this.setStep(0, {
         status: 'completed',
         description: `Generated ${queriesResult.queries.length} query(ies): ${queriesResult.queries.slice(0, 3).join(', ')}${queriesResult.queries.length > 3 ? '...' : ''}. Has codes: ${queriesResult.has_codes}`,
       });
-    } catch (error) {
-      this.setStep(0, { status: 'error', description: 'Failed to generate search queries', error: (error as Error).message });
-      throw error;
-    }
-
-    // Step 2: Select TOC Chapters
-    this.setStep(1, { status: 'in_progress', description: 'Loading TOC from Cosmos DB and selecting relevant paths' });
-    let tocChapters: string[] = [];
-    let tocEntries: FlatTocEntry[] = [];
-    try {
-      const cosmosToc = await loadTOCsFromCosmos(selectedPdfs);
-      let tocContent = cosmosToc.content;
-      tocEntries = cosmosToc.entries;
-
-      if (!tocContent) {
-        // Fallback to legacy markdown TOC if Cosmos is empty/unavailable.
-        tocContent = loadTOCMarkdown(selectedPdfs) || '';
-      }
 
       if (!tocContent) {
         this.setStep(1, { status: 'completed', description: 'No TOC content found. Skipping chapter selection.' });
         tocChapters = [];
       } else {
-        const chaptersResult = await selectTOCChaptersInitial(queriesResult.queries, query, tocContent);
         tocChapters = tocEntries.length > 0
-          ? keepExactPaths(chaptersResult.chapters, tocEntries)
-          : chaptersResult.chapters.map((chapter) => chapter.trim());
+          ? keepExactPaths(plan.chapters, tocEntries)
+          : plan.chapters.map((chapter) => chapter.trim()).filter(Boolean);
         logStep('2 TOC chapters (initial)', `${tocChapters.length} selected -> ${shortList(tocChapters)}`);
         this.setStep(1, {
           status: 'completed',
@@ -536,8 +1014,9 @@ export class MultiStepReasoningService {
         });
       }
     } catch (error) {
+      this.setStep(0, { status: 'error', description: 'Failed to generate search queries / initial TOC paths', error: (error as Error).message });
       this.setStep(1, { status: 'error', description: 'Failed to select paths from TOC', error: (error as Error).message });
-      tocChapters = [];
+      throw error;
     }
 
     // Step 3: Search by TOC / Path Filter
@@ -574,10 +1053,11 @@ export class MultiStepReasoningService {
     if (!answerable) {
       this.setStep(2, { status: 'in_progress', description: 'Fallback: Performing hybrid vector + text search' });
       try {
-        for (const q of queriesResult.queries) {
-          const hybridResults = await hybridAcrossIndexes(q, 5);
-          // Deduplicate by id
-          const existingIds = new Set(initialResults.map(r => r.id));
+        const hybridBatches = await Promise.all(
+          queriesResult.queries.map((q) => hybridAcrossIndexes(q, 5))
+        );
+        const existingIds = new Set(initialResults.map((r) => r.id));
+        for (const hybridResults of hybridBatches) {
           for (const result of hybridResults) {
             if (!existingIds.has(result.id)) {
               initialResults.push(result);
@@ -595,16 +1075,8 @@ export class MultiStepReasoningService {
     this.setStep(4, { status: 'in_progress', description: 'Analyzing documents for additional elements' });
     let elements: any;
     try {
-      let extractTocContent = '';
-      try {
-        const cosmosToc = await loadTOCsFromCosmos(selectedPdfs);
-        extractTocContent = cosmosToc.content;
-      } catch {
-        // ignore
-      }
-      if (!extractTocContent) {
-        extractTocContent = loadTOCMarkdown(selectedPdfs) || '';
-      }
+      const extractToc = await this.getTocForRequest(selectedPdfs);
+      const extractTocContent = extractToc.content;
       const retrievedChapterBodies = initialResults
         .map((result) => `Chapter: ${result.TOC || result.path || ''}\n${result.content || ''}`)
         .filter((block) => block.trim().length > 0)
@@ -614,6 +1086,10 @@ export class MultiStepReasoningService {
         extractTocContent ? `## Table of Contents\n${extractTocContent}` : '',
       ].filter(Boolean).join('\n\n');
       elements = await extractElements(query, textContext, chatHistory);
+      elements = {
+        ...elements,
+        connectors: enrichExtractedConnectors(query, elements, initialResults),
+      };
       logStep(
         '5 extracted elements',
         `codes=${shortList(elements.error_codes || [], 4, 12)} | connectors=${shortList(elements.connectors || [], 4, 12)} | ` +
@@ -658,15 +1134,19 @@ export class MultiStepReasoningService {
       this.lastElements = elements;
     }
 
-    // Step 5a2: Detect Multiple Error Codes (GPT)
+    // Step 5a2: Multiple error codes (merged into extractElements — no extra GPT call)
     this.setStep(5, { status: 'in_progress', description: 'Detecting whether the query includes multiple error codes' });
     try {
-      const extractedCodes: string[] = Array.isArray(elements?.error_codes) ? elements.error_codes : [];
-      const det = await detectMultiErrorCodes(query, extractedCodes, chatHistory);
+      const multiCodes: string[] = Array.isArray(elements?.multi_error_codes) && elements.multi_error_codes.length > 0
+        ? elements.multi_error_codes
+        : (Array.isArray(elements?.error_codes) ? elements.error_codes : []);
+      const isMulti = !!elements?.is_multi_error_codes && multiCodes.length >= 2;
       this.lastMultiError = {
-        isMulti: !!det?.is_multi_error_codes,
-        codes: Array.isArray(det?.error_codes) ? det.error_codes : [],
-        reason: det?.reason,
+        isMulti,
+        codes: isMulti ? multiCodes : [],
+        reason: typeof elements?.multi_error_reason === 'string'
+          ? elements.multi_error_reason
+          : (isMulti ? 'multiple error codes from extractElements' : 'not multi-error'),
       };
       logStep('6 multi error codes', `${this.lastMultiError.isMulti} | codes=${shortList(this.lastMultiError.codes || [], 6, 12)}`);
       this.setStep(5, {
@@ -732,16 +1212,9 @@ export class MultiStepReasoningService {
 
         let additionalTocContent = '';
         let additionalTocEntries: FlatTocEntry[] = [];
-        try {
-          const cosmosToc = await loadTOCsFromCosmos(selectedPdfs);
-          additionalTocContent = cosmosToc.content;
-          additionalTocEntries = cosmosToc.entries;
-        } catch {
-          // ignore
-        }
-        if (!additionalTocContent) {
-          additionalTocContent = loadTOCMarkdown(selectedPdfs) || '';
-        }
+        const additionalToc = await this.getTocForRequest(selectedPdfs);
+        additionalTocContent = additionalToc.content;
+        additionalTocEntries = additionalToc.entries;
 
         if (additionalTocContent) {
           const alreadySearchedChapters = Array.from(
@@ -966,6 +1439,19 @@ export class MultiStepReasoningService {
     // Build context and prepare for streaming
     this.setStep(9, { status: 'in_progress', description: 'Building context for final answer generation' });
     try {
+      if (this.lastElements) {
+        const enrichedConnectors = enrichExtractedConnectors(query, this.lastElements, classifiedResults.main);
+        if (enrichedConnectors.length > (this.lastElements.connectors || []).length) {
+          logStep(
+            '9b connectors enriched from MAIN',
+            `${shortList(this.lastElements.connectors || [], 6, 12)} -> ${shortList(enrichedConnectors, 6, 12)}`
+          );
+        }
+        this.lastElements = {
+          ...this.lastElements,
+          connectors: enrichedConnectors,
+        };
+      }
       const builtContext = await this.buildContext(classifiedResults);
       logStep(
         '10 context built',
@@ -982,9 +1468,9 @@ export class MultiStepReasoningService {
 
     const elapsedMsToAnswerReady = Date.now() - requestStartedAt;
     this.addThinkingStep(
-      'Answer Start Time',
-      `回答開始まで ${elapsedMsToAnswerReady}ms かかりました。` +
-        `（この時点で回答ストリーミング開始準備が完了しています）`
+      'Thinking finished',
+      `検索・分類・コンテキスト準備まで ${elapsedMsToAnswerReady}ms かかりました。` +
+        `この時点ではまだ回答モデルを呼んでいません。`
     );
 
     return {
@@ -1023,7 +1509,7 @@ export class MultiStepReasoningService {
       imageUrls: [] as Array<{ refId: string; title: string; source: string; url: string }>,
     };
 
-    // Build chapter refs and pre-compute SAS URLs
+    // Build chapter refs first (sync), then resolve PDF SAS URLs in parallel.
     for (let i = 0; i < allResults.length; i++) {
       const result = allResults[i];
       const refId = `shop-${i + 1}`;
@@ -1037,50 +1523,21 @@ export class MultiStepReasoningService {
         is_main: isMain,
         is_connector: isConnector,
       });
-
-      // Pre-compute PDF SAS URL
-      const pdfBlobPath = await buildTOCPdfBlobName(result);
-      if (pdfBlobPath) {
-        const sasPdfUrl = await createSasUrl(pdfBlobPath);
-        // Use angle brackets to keep markdown links valid even when URL contains ')'
-        this.refLinkMap.set(refId, `[${result.TOC.replace(/\[/g, '(').replace(/\]/g, ')')}](<${sasPdfUrl}>)`);
-        this.refPdfUrlMap.set(refId, sasPdfUrl);
-        this.pdfUrls.push({ title: result.TOC, url: sasPdfUrl });
-        debugUrls.pdfCitationUrls.push({ refId, title: result.TOC, url: sasPdfUrl });
-      }
-
-      // Process image content
-      if (result.image_content) {
-        const explanations = flattenImageExplanations(result.image_content);
-        for (const exp of explanations as ImageExplanation[]) {
-          if (exp.cropped_image_path) {
-            const sasImageUrl = await createSasUrl(exp.cropped_image_path);
-            this.imageUrls.push(sasImageUrl);
-            debugUrls.imageUrls.push({
-              refId,
-              title: exp.caption || result.TOC,
-              source: 'cropped_image_path',
-              url: sasImageUrl,
-            });
-          }
-        }
-
-        const imageSamePagePaths = (result.same_page_paths || []).filter((p) =>
-          /\.(jpg|jpeg|png|gif|webp)$/i.test(p) || p.includes('/images/')
-        );
-        for (const path of imageSamePagePaths) {
-          const sasImageUrl = await createSasUrl(path);
-          this.imageUrls.push(sasImageUrl);
-          debugUrls.imageUrls.push({
-            refId,
-            title: result.TOC,
-            source: 'same_page_paths',
-            url: sasImageUrl,
-          });
-        }
-      }
-
     }
+
+    await mapPool(chapterRefs, 8, async (ref) => {
+      const pdfBlobPath = await buildTOCPdfBlobName(ref.result);
+      if (!pdfBlobPath) return;
+      const sasPdfUrl = await createSasUrl(pdfBlobPath);
+      // Use angle brackets to keep markdown links valid even when URL contains ')'
+      this.refLinkMap.set(
+        ref.ref_id,
+        `[${ref.title.replace(/\[/g, '(').replace(/\]/g, ')')}](<${sasPdfUrl}>)`
+      );
+      this.refPdfUrlMap.set(ref.ref_id, sasPdfUrl);
+      this.pdfUrls.push({ title: ref.title, url: sasPdfUrl });
+      debugUrls.pdfCitationUrls.push({ refId: ref.ref_id, title: ref.title, url: sasPdfUrl });
+    });
 
     // Build combined context
     let combinedContext = '';
@@ -1129,13 +1586,13 @@ export class MultiStepReasoningService {
     if (this.lastMultiError?.isMulti && Array.isArray(this.lastMultiError.codes) && this.lastMultiError.codes.length >= 2) {
       const connectorRefs = chapterRefs.filter((ref) => ref.is_connector);
       combinedContext += `MULTI_ERROR_CONNECTOR_COMMON:\n`;
-      combinedContext += `${buildConnectorSectionForRefs('Common connector refs', connectorRefs, this.refPdfUrlMap)}\n\n`;
+      combinedContext += `${buildConnectorSectionForRefs('Common connector refs', connectorRefs)}\n\n`;
 
       for (const code of this.lastMultiError.codes) {
         const codeSpecificConnectorRefs = collectConnectorRefsForErrorCode(chapterRefs, code);
         combinedContext += `MULTI_ERROR_CONNECTOR_${code}:\n`;
         if (codeSpecificConnectorRefs.length > 0) {
-          combinedContext += `${buildConnectorSectionForRefs(`Connector refs for ${code}`, codeSpecificConnectorRefs, this.refPdfUrlMap)}\n\n`;
+          combinedContext += `${buildConnectorSectionForRefs(`Connector refs for ${code}`, codeSpecificConnectorRefs)}\n\n`;
         } else {
           combinedContext += `- No connector chapter explicitly matched ${code}. Reuse the common connector refs above if needed.\n\n`;
         }
@@ -1143,29 +1600,49 @@ export class MultiStepReasoningService {
       combinedContext += `---\n`;
     }
 
+    // Pre-register all image SAS URLs in parallel before assembling context text.
+    const imagePathsToRegister = new Set<string>();
+    for (const ref of chapterRefs) {
+      const result = ref.result;
+      if (result.image_content) {
+        for (const exp of selectImageExplanationsForRef(
+          flattenImageExplanations(result.image_content),
+          ref,
+          extractedConnectorNos
+        ) as ImageExplanation[]) {
+          if (exp.cropped_image_path) imagePathsToRegister.add(exp.cropped_image_path);
+        }
+      }
+      for (const path of (result.same_page_paths || []).filter((p) =>
+        /\.(jpg|jpeg|png|gif|webp)$/i.test(p)
+      )) {
+        imagePathsToRegister.add(path);
+      }
+    }
+    await mapPool(Array.from(imagePathsToRegister), 12, async (path) => {
+      await this.registerImageUrl(path);
+    });
+
     for (const ref of chapterRefs) {
       const result = ref.result;
       const typeLabel = ref.is_main ? 'MAIN' : ref.is_connector ? 'CONNECTOR' : 'SUB';
-      
-      const citationUrl = this.refPdfUrlMap.get(ref.ref_id) ?? '';
 
       combinedContext += `--- Document Ref: [${ref.ref_id}] (${typeLabel}) ---\n`;
       combinedContext += `pdf_title: ${ref.title}\n`;
-      if (citationUrl) {
-        // PDF-only citation URL. IMPORTANT: must NOT be used for images.
-        combinedContext += `PDF_CITATION_URL: ${citationUrl}\n`;
-        combinedContext += `PDF_CITATION_MARKDOWN: [${ref.title.replace(/\[/g, '(').replace(/\]/g, ')')}](<${citationUrl}>)\n`;
+      if (this.refLinkMap.has(ref.ref_id)) {
+        combinedContext += `PDF_CITATION_ID: ${ref.ref_id}\n`;
+        combinedContext += `PDF_CITATION_TOKEN: [[PDF:${ref.ref_id}]]\n`;
       }
       combinedContext += `chunk_info: pages ${result.start_page}-${result.end_page}\n`;
       combinedContext += `context (chapter body text; connector table Connector No. must come from MAIN context, not from image_explanation): ${result.content}\n`;
 
       if (result.image_content) {
         const explanations = flattenImageExplanations(result.image_content);
-        const selectedExplanations = filterImageExplanationsByConnectorNos(explanations, extractedConnectorNos);
+        const selectedExplanations = selectImageExplanationsForRef(explanations, ref, extractedConnectorNos);
         combinedContext += `image_explanation (insert these with [[IMG:<file name>]]; never write a URL):\n`;
         for (const exp of selectedExplanations as ImageExplanation[]) {
           const imageName = exp.cropped_image_path
-            ? await this.registerImageUrl(exp.cropped_image_path)
+            ? (exp.cropped_image_path.split('/').pop() || exp.cropped_image_path)
             : '';
           combinedContext += `  - Caption: ${exp.caption}\n`;
           if (imageName) {
@@ -1177,16 +1654,24 @@ export class MultiStepReasoningService {
         }
       }
 
-      // Every image available for this chapter, referenced by file name only.
+      // SAS only for images attached to this search hit (cropped paths + same-page paths).
       const chapterImageNames = new Set<string>();
+      if (result.image_content) {
+        for (const exp of selectImageExplanationsForRef(
+          flattenImageExplanations(result.image_content),
+          ref,
+          extractedConnectorNos
+        ) as ImageExplanation[]) {
+          if (exp.cropped_image_path) {
+            chapterImageNames.add(exp.cropped_image_path.split('/').pop() || exp.cropped_image_path);
+          }
+        }
+      }
       const imageSamePagePaths = (result.same_page_paths || []).filter((p) =>
         /\.(jpg|jpeg|png|gif|webp)$/i.test(p)
       );
       for (const path of imageSamePagePaths) {
-        chapterImageNames.add(await this.registerImageUrl(path));
-      }
-      for (const blobPath of await this.findAllImageBlobsForResult(result)) {
-        chapterImageNames.add(await this.registerImageUrl(blobPath));
+        chapterImageNames.add(path.split('/').pop() || path);
       }
       if (chapterImageNames.size > 0) {
         combinedContext += `available_images (file names you may insert with [[IMG:<file name>]]):\n`;
@@ -1198,6 +1683,7 @@ export class MultiStepReasoningService {
       combinedContext += `--- End of Document Ref: [${ref.ref_id}] ---\n\n`;
     }
 
+    this.lastCombinedContext = combinedContext;
     return combinedContext;
   }
 
@@ -1209,20 +1695,47 @@ export class MultiStepReasoningService {
     query: string,
     classifiedResults: ClassifiedResults,
     chatHistory: any[],
-    onChunk: (chunk: string) => void
+    onChunk: (chunk: string) => void,
+    streamHooks?: {
+      onModelFirstToken?: (msFromAnswerStart: number) => void;
+      onHoldChange?: (holding: boolean) => void;
+    }
   ): Promise<string> {
     const effectiveResults = this.lastClassifiedResults ?? classifiedResults;
-    const combinedContext = await this.buildContext(effectiveResults);
-    return await streamFinalAnswer(
-      query,
-      combinedContext,
-      chatHistory,
-      this.lastAnswerPatterns,
-      { isMulti: this.lastMultiError.isMulti, codes: this.lastMultiError.codes },
-      this.manualMode,
-      onChunk,
-      this.imageUrls,
-      this.imageSasUrlMap
+    const combinedContext = this.lastCombinedContext || await this.buildContext(effectiveResults);
+    // Fast mode: answer generation uses no reasoning. Thinking mode keeps light reasoning.
+    const answerReasoningEffort = this.getAnswerReasoningEffort();
+    const effortNote =
+      answerReasoningEffort === CHAT_REASONING_EFFORT
+        ? 'Reasoning effort: none (No reasoning)'
+        : `Reasoning effort: ${answerReasoningEffort}`;
+    const answerStepIndex = this.thinkingSteps.length;
+    this.addThinkingStep(
+      'Calling answer model',
+      `Starting answer model stream. First token may wait on Azure. ${effortNote}`,
+      'in_progress',
+      answerReasoningEffort
     );
+    try {
+      const answer = await streamFinalAnswer(
+        query,
+        combinedContext,
+        slimChatHistory(chatHistory),
+        this.lastAnswerPatterns,
+        { isMulti: this.lastMultiError.isMulti, codes: this.lastMultiError.codes },
+        this.manualMode,
+        onChunk,
+        this.imageUrls,
+        this.imageSasUrlMap,
+        this.refLinkMap,
+        answerReasoningEffort,
+        streamHooks
+      );
+      this.updateThinkingStep(answerStepIndex, 'completed');
+      return answer;
+    } catch (error) {
+      this.updateThinkingStep(answerStepIndex, 'error', (error as Error).message);
+      throw error;
+    }
   }
 }

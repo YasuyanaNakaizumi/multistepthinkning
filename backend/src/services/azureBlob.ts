@@ -227,11 +227,15 @@ export function buildTOCPdfBlobNameCandidates(result: SearchResult): string[] {
 export async function buildTOCPdfBlobName(result: SearchResult): Promise<string | null> {
   try {
     const candidates = buildTOCPdfBlobNameCandidates(result);
-    for (const candidate of candidates) {
-      if (await blobExists(candidate)) {
-        return candidate;
-      }
-    }
+    if (candidates.length === 0) return null;
+
+    // Check candidates in parallel, then keep the first existing path in preference order.
+    const existence = await Promise.all(
+      candidates.map(async (candidate) => ({ candidate, exists: await blobExists(candidate) }))
+    );
+    const found = existence.find((entry) => entry.exists);
+    if (found) return found.candidate;
+
     // Fallback: even if existence could not be confirmed, use the best candidate
     // so the answer can still offer a PDF link. The browser will 404 if it is wrong.
     return candidates[0] || null;

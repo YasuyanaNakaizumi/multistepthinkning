@@ -23,9 +23,11 @@ import {
   ExternalLink,
   Image as ImageIcon,
   Menu,
+  ChevronDown,
 } from 'lucide-react';
 import { ChatMessage as ChatMessageType, ThinkingStep } from './types';
 import type { Document } from './types';
+import { useLocale, formatReasoningEffortLabel } from './i18n';
 
 const LANGUAGES = [
   { value: 'Japanese', label: '日本語' },
@@ -46,10 +48,6 @@ function normalizeSourceKey(value: string | undefined): string {
 function getSourceKeyFromDocument(doc: Document): string {
   const normalized = normalizeSourceKey(doc.sourceDocumentType);
   return normalized.includes('operationandmaintenancemanual') ? 'operation_and_maintenance_manual' : 'shop_manual';
-}
-
-function getSourceLabel(key: string): string {
-  return key === 'operation_and_maintenance_manual' ? 'Operation & Maintenance Manual' : 'Shop Manual';
 }
 
 function truncateText(value: string, maxLength: number): string {
@@ -174,6 +172,7 @@ function formatModelSerial(doc: Document, fallbackModel?: string, fallbackSerial
 }
 
 function App() {
+  const { locale, setLocale, t } = useLocale();
   const [messages, setMessages] = useState<ChatMessageType[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -182,6 +181,15 @@ function App() {
   const [selectedOperationManual, setSelectedOperationManual] = useState<Document | null>(null);
   const [docSearchQuery, setDocSearchQuery] = useState('');
   const [streamedContent, setStreamedContent] = useState('');
+  const [streamImageUrls, setStreamImageUrls] = useState<string[]>([]);
+  const [streamAnswerTiming, setStreamAnswerTiming] = useState<{
+    firstTokenMs: number;
+    completeMs?: number;
+    modelFirstTokenMs?: number;
+    holdDelayMs?: number;
+  } | null>(null);
+  const [streamAnswerReasoningEffort, setStreamAnswerReasoningEffort] = useState<string | null>(null);
+  const [streamHolding, setStreamHolding] = useState(false);
   const [currentThinkingSteps, setCurrentThinkingSteps] = useState<ThinkingStep[]>([]);
   const [preview, setPreview] = useState<PreviewPanel | null>(null);
   const [showDocSetup, setShowDocSetup] = useState(false);
@@ -200,6 +208,7 @@ function App() {
   const [isAzureAdReady, setIsAzureAdReady] = useState(false);
   const [isAzureAdEnabled, setIsAzureAdEnabled] = useState(false);
   const [activeThinkingSourceKey, setActiveThinkingSourceKey] = useState('shop_manual');
+  const [chatMode, setChatMode] = useState<'thinking' | 'fast'>('thinking');
   const [showMobileNav, setShowMobileNav] = useState(false);
   const [composerPad, setComposerPad] = useState(180);
   const selectedDocuments = [selectedShopManual, selectedOperationManual].filter(Boolean) as Document[];
@@ -280,10 +289,14 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (preview) {
+      shouldAutoScrollRef.current = false;
+      return;
+    }
     if (shouldAutoScrollRef.current && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages, streamedContent]);
+  }, [messages, streamedContent, preview]);
 
   useEffect(() => {
     if (!showDocSetup) return;
@@ -333,6 +346,7 @@ function App() {
   };
 
   const openPreview = (kind: 'pdf' | 'image', url: string, title?: string) => {
+    shouldAutoScrollRef.current = false;
     setPreview({ kind, url, title });
     if (kind === 'image') setZoom(1);
   };
@@ -344,6 +358,10 @@ function App() {
   const resetChat = () => {
     setMessages([]);
     setStreamedContent('');
+    setStreamImageUrls([]);
+    setStreamAnswerTiming(null);
+    setStreamAnswerReasoningEffort(null);
+    setStreamHolding(false);
     setCurrentThinkingSteps([]);
     setPreview(null);
     setInput('');
@@ -429,9 +447,56 @@ function App() {
     setInput('');
     setIsLoading(true);
     setStreamedContent('');
+    setStreamImageUrls([]);
+    setStreamAnswerTiming(null);
+    setStreamAnswerReasoningEffort(chatMode === 'fast' ? 'none' : 'low');
+    setStreamHolding(false);
     setCurrentThinkingSteps([]);
 
     let fullText = '';
+    let meta: any = null;
+    let latestThinkingSteps: ThinkingStep[] = [];
+    let answerReasoningEffort: string | undefined =
+      chatMode === 'fast' ? 'none' : 'low';
+    const requestStartedAt = performance.now();
+    let firstTokenMs: number | null = null;
+    let modelFirstTokenMs: number | undefined;
+    let modelFirstTokenEventAt: number | null = null;
+    let holdDelayMs: number | undefined;
+    let pendingPaint = '';
+    let paintTimer: number | null = null;
+
+    const flushPaint = () => {
+      if (!pendingPaint) return;
+      fullText += pendingPaint;
+      pendingPaint = '';
+      setStreamedContent(fullText);
+    };
+
+    const schedulePaint = (text: string) => {
+      // First visible character: paint immediately (low UI TTFT).
+      if (firstTokenMs === null) {
+        firstTokenMs = Math.max(0, Math.round(performance.now() - requestStartedAt));
+        if (modelFirstTokenEventAt !== null) {
+          holdDelayMs = Math.max(0, Math.round(performance.now() - modelFirstTokenEventAt));
+        }
+        setStreamAnswerTiming({
+          firstTokenMs,
+          modelFirstTokenMs,
+          holdDelayMs,
+        });
+        fullText += text;
+        setStreamedContent(fullText);
+        return;
+      }
+      // After first char: light coalesce (~32ms) for smoother Markdown updates.
+      pendingPaint += text;
+      if (paintTimer !== null) return;
+      paintTimer = window.setTimeout(() => {
+        paintTimer = null;
+        flushPaint();
+      }, 32);
+    };
 
     try {
       const controller = new AbortController();
@@ -443,9 +508,10 @@ function App() {
         body: JSON.stringify({
           query: queryText,
           selectedDocuments: docsForSend,
-          chatHistory: messages,
+          chatHistory: messages.map((message) => ({ role: message.role, content: message.content })),
           chatSessionId,
           userEmail: azureAdEmail,
+          mode: chatMode,
         }),
       });
 
@@ -457,7 +523,6 @@ function App() {
       const decoder = new TextDecoder();
 
       let buffer = '';
-      let meta: any = null;
 
       if (reader) {
         while (true) {
@@ -485,7 +550,7 @@ function App() {
             if (!dataLine) continue;
 
             const eventName = eventLine ? eventLine.replace('event:', '').trim() : 'message';
-            const dataText = dataLine.replace('data:', '').trim();
+            const dataText = dataLine.replace(/^data:\s?/, '').trim();
             let payload: any;
             try {
               payload = JSON.parse(dataText);
@@ -494,32 +559,94 @@ function App() {
             }
 
             if (eventName === 'steps' && payload?.steps) {
+              latestThinkingSteps = payload.steps;
               setCurrentThinkingSteps(payload.steps);
             }
             if (eventName === 'meta' && payload) {
               meta = payload;
+              if (typeof payload.answerReasoningEffort === 'string') {
+                answerReasoningEffort = payload.answerReasoningEffort;
+                setStreamAnswerReasoningEffort(payload.answerReasoningEffort);
+              }
+              if (Array.isArray(payload.imageUrls)) {
+                setStreamImageUrls(payload.imageUrls);
+              }
               if (payload.thinkingSteps) {
+                latestThinkingSteps = payload.thinkingSteps;
                 setCurrentThinkingSteps(payload.thinkingSteps);
               }
             }
-            if (eventName === 'chunk' && payload?.text) {
-              fullText += payload.text;
-              setStreamedContent(fullText);
+            if (eventName === 'timing' && typeof payload?.modelFirstTokenMs === 'number') {
+              modelFirstTokenMs = Math.max(0, Math.round(payload.modelFirstTokenMs));
+              modelFirstTokenEventAt = performance.now();
+              setStreamAnswerTiming((prev) =>
+                prev
+                  ? { ...prev, modelFirstTokenMs }
+                  : firstTokenMs !== null
+                    ? { firstTokenMs, modelFirstTokenMs }
+                    : null
+              );
+            }
+            if (eventName === 'stream_status' && typeof payload?.holding === 'boolean') {
+              setStreamHolding(payload.holding);
+            }
+            if ((eventName === 'chunk' || eventName === 'message') && payload?.text) {
+              setStreamHolding(false);
+              schedulePaint(String(payload.text));
             }
             if (eventName === 'final' && typeof payload?.text === 'string') {
-              fullText = payload.text;
-              setStreamedContent(fullText);
+              if (paintTimer !== null) {
+                window.clearTimeout(paintTimer);
+                paintTimer = null;
+              }
+              flushPaint();
+              // Apply final rewrite only when it differs (avoid visible jump on identical text).
+              if (payload.text !== fullText) {
+                fullText = payload.text;
+                setStreamedContent(fullText);
+              }
+              if (firstTokenMs === null && payload.text.length > 0) {
+                firstTokenMs = Math.max(0, Math.round(performance.now() - requestStartedAt));
+                setStreamAnswerTiming({
+                  firstTokenMs,
+                  modelFirstTokenMs,
+                  holdDelayMs,
+                });
+              }
             }
           }
         }
       }
 
+      if (paintTimer !== null) {
+        window.clearTimeout(paintTimer);
+        paintTimer = null;
+      }
+      flushPaint();
+      setStreamHolding(false);
+
+      const completeMs = Math.max(0, Math.round(performance.now() - requestStartedAt));
+      const answerTiming =
+        firstTokenMs !== null
+          ? { firstTokenMs, completeMs, modelFirstTokenMs, holdDelayMs }
+          : fullText
+            ? { firstTokenMs: completeMs, completeMs, modelFirstTokenMs, holdDelayMs }
+            : undefined;
+      if (answerTiming) {
+        setStreamAnswerTiming(answerTiming);
+      }
+
+      const finalThinkingSteps =
+        latestThinkingSteps.length > 0
+          ? latestThinkingSteps
+          : meta?.thinkingSteps || [];
+
       const assistantMessage: ChatMessageType = {
         role: 'assistant',
         content: fullText,
-        thinkingSteps: meta?.thinkingSteps || currentThinkingSteps,
+        thinkingSteps: finalThinkingSteps,
         thinkingStepsBySource: thinkingSources.reduce<Record<string, ThinkingStep[]>>((acc, source) => {
-          acc[source.key] = meta?.thinkingSteps || currentThinkingSteps;
+          acc[source.key] = finalThinkingSteps;
           return acc;
         }, {}),
         thinkingQuery: queryText,
@@ -533,42 +660,71 @@ function App() {
         activeThinkingSourceKey,
         imageUrls: meta?.imageUrls,
         pdfUrls: meta?.pdfUrls,
+        answerTiming,
+        answerReasoningEffort,
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
       setStreamedContent('');
+      setStreamImageUrls([]);
+      setStreamAnswerTiming(null);
+      setStreamAnswerReasoningEffort(null);
+      setStreamHolding(false);
     } catch (error: any) {
+      if (paintTimer !== null) {
+        window.clearTimeout(paintTimer);
+        paintTimer = null;
+      }
+      flushPaint();
+      setStreamHolding(false);
       const isAbort = error?.name === 'AbortError';
       if (isAbort) {
         if (fullText) {
+          const completeMs = Math.max(0, Math.round(performance.now() - requestStartedAt));
+          const answerTiming = {
+            firstTokenMs: firstTokenMs ?? completeMs,
+            completeMs,
+            modelFirstTokenMs,
+            holdDelayMs,
+          };
+          const finalThinkingSteps =
+            latestThinkingSteps.length > 0 ? latestThinkingSteps : currentThinkingSteps;
           setMessages((prev) => [
             ...prev,
             {
               role: 'assistant',
               content: fullText,
-              thinkingSteps: currentThinkingSteps,
+              thinkingSteps: finalThinkingSteps,
               thinkingStepsBySource: thinkingSources.reduce<Record<string, ThinkingStep[]>>((acc, source) => {
-                acc[source.key] = currentThinkingSteps;
+                acc[source.key] = finalThinkingSteps;
                 return acc;
               }, {}),
               thinkingQuery: queryText,
               thinkingDocuments: docsForSend,
               thinkingSources,
               activeThinkingSourceKey: activeThinkingSource,
+              imageUrls: meta?.imageUrls,
+              pdfUrls: meta?.pdfUrls,
+              answerTiming,
+              answerReasoningEffort,
             },
           ]);
           setStreamedContent('');
+          setStreamImageUrls([]);
+          setStreamAnswerTiming(null);
+          setStreamAnswerReasoningEffort(null);
         }
       } else {
         console.error('Error sending message:', error);
         setMessages((prev) => [
           ...prev,
-          { role: 'assistant', content: 'Sorry, an error occurred while processing your request.' },
+          { role: 'assistant', content: t('chatError') },
         ]);
       }
     } finally {
       abortRef.current = null;
       setIsLoading(false);
+      setStreamHolding(false);
     }
   };
 
@@ -603,7 +759,10 @@ function App() {
   const thinkingSources = selectedDocuments.reduce<{ key: string; label: string }[]>((acc, doc) => {
     const key = getSourceKeyFromDocument(doc);
     if (acc.some((s) => s.key === key)) return acc;
-    acc.push({ key, label: getSourceLabel(key) });
+    acc.push({
+      key,
+      label: key === 'operation_and_maintenance_manual' ? t('ommManual') : t('shopManual'),
+    });
     return acc;
   }, []);
   const activeThinkingSource = thinkingSources.find((source) => source.key === activeThinkingSourceKey)?.key
@@ -613,16 +772,16 @@ function App() {
   const canChat = selectedDocuments.length > 0;
   const isLanding = messages.length === 0 && !isLoading;
   const selectedDocumentParts = [
-    model.trim() && `機種型式 ${model.trim()}`,
-    serial.trim() && `機番 ${serial.trim()}`,
-    selectedShopManual && formatSelectedDocument('ショップ', selectedShopManual),
-    selectedOperationManual && formatSelectedDocument('取説', selectedOperationManual),
+    model.trim() && `${t('modelType')} ${model.trim()}`,
+    serial.trim() && `${t('serialNumber')} ${serial.trim()}`,
+    selectedShopManual && formatSelectedDocument(t('shopShort'), selectedShopManual),
+    selectedOperationManual && formatSelectedDocument(t('ommShort'), selectedOperationManual),
   ].filter((part): part is string => Boolean(part));
   const selectedDocumentsTitle = [
-    model.trim() && `機種型式: ${model.trim()}`,
-    serial.trim() && `機番: ${serial.trim()}`,
-    selectedShopManual && `ショップ: ${selectedShopManual.documentTitle} (${selectedShopManual.documentNumber})`,
-    selectedOperationManual && `取説: ${selectedOperationManual.documentTitle} (${selectedOperationManual.documentNumber})`,
+    model.trim() && `${t('modelType')}: ${model.trim()}`,
+    serial.trim() && `${t('serialNumber')}: ${serial.trim()}`,
+    selectedShopManual && `${t('shopShort')}: ${selectedShopManual.documentTitle} (${selectedShopManual.documentNumber})`,
+    selectedOperationManual && `${t('ommShort')}: ${selectedOperationManual.documentTitle} (${selectedOperationManual.documentNumber})`,
   ].filter(Boolean).join('\n');
 
   const composer = canChat ? (
@@ -633,10 +792,12 @@ function App() {
       onKeyDown={handleKeyDown}
       onSend={handleSend}
       isLoading={isLoading}
-      placeholder="手順、エラーコード、コネクタについて質問できます…"
+      placeholder={t('chatPlaceholder')}
       documentParts={selectedDocumentParts}
       documentTitle={selectedDocumentsTitle}
       onChangeDocuments={() => setShowDocSetup(true)}
+      chatMode={chatMode}
+      onChatModeChange={setChatMode}
     />
   ) : null;
 
@@ -656,7 +817,7 @@ function App() {
       <div className="flex h-[var(--app-height,100dvh)] items-center justify-center bg-neutral-50 px-4 text-neutral-500">
         <div className="flex items-center gap-2 text-sm">
           <Loader2 className="h-4 w-4 animate-spin" />
-          <span>Azure AD認証画面へ移動しています…</span>
+          <span>{t('azureAdRedirect')}</span>
         </div>
       </div>
     );
@@ -684,37 +845,61 @@ function App() {
             }}
             disabled={isLoading}
             className="flex-1 flex items-center justify-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-sm font-medium text-neutral-800 transition hover:border-neutral-300 hover:bg-neutral-50 disabled:opacity-50"
-            title="新規チャット"
+            title={t('newChat')}
           >
             <Plus className="h-4 w-4" />
-            新規チャット
+            {t('newChat')}
           </button>
           <button
             type="button"
             className="md:hidden inline-flex h-10 w-10 items-center justify-center rounded-md hover:bg-neutral-100"
             onClick={() => setShowMobileNav(false)}
-            title="閉じる"
+            title={t('close')}
           >
             <X className="h-4 w-4" />
           </button>
         </div>
+        <div className="flex-1" />
+        <div className="px-2 pb-2">
+          <div className="text-[11px] text-neutral-500 mb-1 px-1">{t('uiLanguage')}</div>
+          <div className="grid grid-cols-2 gap-1 rounded-lg border border-neutral-200 p-0.5 bg-neutral-50">
+            <button
+              type="button"
+              onClick={() => setLocale('ja')}
+              className={`rounded-md px-2 py-1.5 text-xs font-medium transition ${
+                locale === 'ja' ? 'bg-white text-neutral-900 shadow-sm' : 'text-neutral-500 hover:text-neutral-800'
+              }`}
+            >
+              日本語
+            </button>
+            <button
+              type="button"
+              onClick={() => setLocale('en')}
+              className={`rounded-md px-2 py-1.5 text-xs font-medium transition ${
+                locale === 'en' ? 'bg-white text-neutral-900 shadow-sm' : 'text-neutral-500 hover:text-neutral-800'
+              }`}
+            >
+              English
+            </button>
+          </div>
+        </div>
         {isAzureAdEnabled && (
-          <div className="mt-auto p-2 border-t border-neutral-100">
+          <div className="p-2 border-t border-neutral-100">
             {azureAdUserName ? (
               <div className="px-1">
                 <div className="text-[11px] text-neutral-500 truncate" title={azureAdEmail}>
-                  {azureAdUserName || 'Signed in'}
+                  {azureAdUserName || t('signedIn')}
                 </div>
                 <button
                   type="button"
                   onClick={handleAzureAdSignOut}
                   className="mt-1 text-xs text-neutral-500 hover:text-neutral-800"
                 >
-                  Sign out
+                  {t('signOut')}
                 </button>
               </div>
             ) : (
-              <div className="px-1 text-[11px] text-red-600">Not authenticated</div>
+              <div className="px-1 text-[11px] text-red-600">{t('notAuthenticated')}</div>
             )}
           </div>
         )}
@@ -726,11 +911,11 @@ function App() {
             type="button"
             onClick={() => setShowMobileNav(true)}
             className="inline-flex h-10 w-10 items-center justify-center rounded-md hover:bg-neutral-100"
-            title="メニュー"
+            title={t('menu')}
           >
             <Menu className="h-5 w-5" />
           </button>
-          <div className="flex-1 min-w-0 text-sm font-semibold truncate">改善版AI bot試作版</div>
+          <div className="flex-1 min-w-0 text-sm font-semibold truncate">{t('appTitle')}</div>
           <button
             type="button"
             onClick={resetChat}
@@ -738,7 +923,7 @@ function App() {
             className="inline-flex items-center gap-1 rounded-md border border-neutral-200 px-2.5 py-1.5 text-xs font-medium hover:bg-neutral-50 disabled:opacity-50"
           >
             <Plus className="h-3.5 w-3.5" />
-            新規
+            {t('newChatShort')}
           </button>
         </div>
         {isLanding ? (
@@ -746,10 +931,10 @@ function App() {
             <div className="w-full max-w-2xl min-w-0 flex flex-col items-center">
               <div className="text-center mb-6 sm:mb-8">
                 <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight text-neutral-900">
-                  改善版AI bot試作版
+                  {t('appTitle')}
                 </h1>
                 <p className="mt-2 text-sm text-neutral-500 leading-relaxed">
-                  対象機種のマニュアルを選んで、手順・故障・エラーコードを質問できます
+                  {t('appSubtitle')}
                 </p>
               </div>
 
@@ -760,7 +945,7 @@ function App() {
                   className="inline-flex items-center justify-center gap-2 rounded-full bg-neutral-900 px-6 py-3 text-sm font-semibold text-white shadow-md transition hover:bg-neutral-800 hover:shadow-lg active:scale-[0.98]"
                 >
                   <Settings2 className="h-4 w-4" />
-                  ドキュメント設定
+                  {t('documentSetup')}
                   <ChevronRight className="h-4 w-4" />
                 </button>
               )}
@@ -775,10 +960,10 @@ function App() {
                         size="sm"
                         onClick={() => abortRef.current?.abort()}
                         className="h-7 px-2 text-xs gap-1"
-                        title="生成を停止"
+                        title={t('stopTitle')}
                       >
                         <Square className="h-3.5 w-3.5" />
-                        停止
+                        {t('stop')}
                       </Button>
                     </div>
                   )}
@@ -813,15 +998,30 @@ function App() {
                           thinkingSteps: [],
                           thinkingSources,
                           activeThinkingSourceKey: activeThinkingSource,
+                          imageUrls: streamImageUrls,
+                          answerTiming: streamAnswerTiming || undefined,
+                          answerReasoningEffort: streamAnswerReasoningEffort || undefined,
                         }}
+                        streaming
                         onOpenPdf={(url, title) => openPreview('pdf', url, title)}
                         onOpenImage={(url, alt) => openPreview('image', url, alt)}
                       />
                     ) : (
-                      <div className="flex items-center gap-2 text-neutral-500 text-sm pl-1">
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                        <span>回答を作成しています…</span>
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-neutral-500 text-sm pl-1">
+                        <Loader2 className="h-4 w-4 animate-spin shrink-0" />
+                        <span>{t('creatingAnswer')}</span>
+                        {streamHolding && (
+                          <span className="text-[11px] text-neutral-400">{t('assetLinkPreparing')}</span>
+                        )}
+                        {streamAnswerReasoningEffort && (
+                          <span className="text-[11px] text-neutral-400 tabular-nums">
+                            {formatReasoningEffortLabel(streamAnswerReasoningEffort, t)}
+                          </span>
+                        )}
                       </div>
+                    )}
+                    {streamedContent && streamHolding && (
+                      <div className="text-[11px] text-neutral-400 pl-1 -mt-2">{t('assetLinkPreparing')}</div>
                     )}
                   </div>
                 )}
@@ -837,10 +1037,10 @@ function App() {
                       size="sm"
                       onClick={() => abortRef.current?.abort()}
                       className="h-7 px-2 text-xs gap-1"
-                      title="生成を停止"
+                      title={t('stopTitle')}
                     >
                       <Square className="h-3.5 w-3.5" />
-                      停止
+                      {t('stop')}
                     </Button>
                   </div>
                 )}
@@ -865,7 +1065,7 @@ function App() {
               }
               setIsResizingPdf(true);
             }}
-            title="Drag to resize"
+            title={t('dragToResize')}
           />
           <aside
             className="fixed inset-0 z-50 w-full max-w-[100vw] bg-white flex flex-col md:static md:inset-auto md:z-auto md:shrink-0 md:border-l md:border-neutral-200 md:w-[var(--panel-width)]"
@@ -887,7 +1087,7 @@ function App() {
                     size="icon"
                     className="h-7 w-7"
                     onClick={() => setZoom((z) => Math.max(0.25, Math.round((z - 0.25) * 100) / 100))}
-                    title="縮小"
+                    title={t('zoomOut')}
                   >
                     <ZoomOut className="h-3.5 w-3.5" />
                   </Button>
@@ -897,11 +1097,11 @@ function App() {
                     size="icon"
                     className="h-7 w-7"
                     onClick={() => setZoom((z) => Math.min(5, Math.round((z + 0.25) * 100) / 100))}
-                    title="拡大"
+                    title={t('zoomIn')}
                   >
                     <ZoomIn className="h-3.5 w-3.5" />
                   </Button>
-                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setZoom(1)} title="リセット">
+                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setZoom(1)} title={t('resetZoom')}>
                     <RotateCcw className="h-3.5 w-3.5" />
                   </Button>
                 </>
@@ -910,11 +1110,11 @@ function App() {
                 type="button"
                 onClick={() => openPreviewInNewWindow(preview.url)}
                 className="inline-flex items-center justify-center h-7 w-7 rounded-md hover:bg-neutral-100"
-                title="別ウィンドウで開く"
+                title={t('openInNewWindow')}
               >
                 <ExternalLink className="h-3.5 w-3.5" />
               </button>
-              <Button variant="ghost" size="icon" onClick={() => setPreview(null)} title="Close" className="h-7 w-7">
+              <Button variant="ghost" size="icon" onClick={() => setPreview(null)} title={t('close')} className="h-7 w-7">
                 <X className="h-3.5 w-3.5" />
               </Button>
             </div>
@@ -975,6 +1175,7 @@ function SelectedDocumentsLine({
   disabled?: boolean;
   onChange: () => void;
 }) {
+  const { t } = useLocale();
   return (
     <div className="flex items-start gap-2 min-w-0">
       <div className="flex-1 min-w-0 text-[11px] leading-4 text-neutral-500 break-words" title={title}>
@@ -988,7 +1189,7 @@ function SelectedDocumentsLine({
         className="shrink-0 inline-flex items-center gap-1 rounded-full border border-neutral-200 bg-white px-2 py-0.5 text-[11px] font-medium text-neutral-600 hover:border-neutral-300 hover:bg-neutral-50 disabled:opacity-50"
       >
         <Settings2 className="h-3 w-3" />
-        変更
+        {t('change')}
       </button>
     </div>
   );
@@ -1005,6 +1206,8 @@ function ChatComposer({
   documentParts,
   documentTitle,
   onChangeDocuments,
+  chatMode,
+  onChatModeChange,
 }: {
   textareaRef: React.RefObject<HTMLTextAreaElement>;
   value: string;
@@ -1016,21 +1219,111 @@ function ChatComposer({
   documentParts: string[];
   documentTitle: string;
   onChangeDocuments: () => void;
+  chatMode: 'thinking' | 'fast';
+  onChatModeChange: (mode: 'thinking' | 'fast') => void;
 }) {
+  const [modeMenuOpen, setModeMenuOpen] = useState(false);
+  const modeMenuRef = useRef<HTMLDivElement>(null);
+  const { t } = useLocale();
+
+  useEffect(() => {
+    if (!modeMenuOpen) return;
+    const onPointerDown = (event: MouseEvent | TouchEvent) => {
+      const target = event.target as Node | null;
+      if (modeMenuRef.current && target && !modeMenuRef.current.contains(target)) {
+        setModeMenuOpen(false);
+      }
+    };
+    const onKeyDownEsc = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setModeMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('touchstart', onPointerDown);
+    document.addEventListener('keydown', onKeyDownEsc);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('touchstart', onPointerDown);
+      document.removeEventListener('keydown', onKeyDownEsc);
+    };
+  }, [modeMenuOpen]);
+
+  const modeOptions: Array<{
+    id: 'thinking' | 'fast';
+    label: string;
+    description: string;
+  }> = [
+    {
+      id: 'thinking',
+      label: t('modeThinking'),
+      description: t('modeThinkingDesc'),
+    },
+    {
+      id: 'fast',
+      label: t('modeFast'),
+      description: t('modeFastDesc'),
+    },
+  ];
+  const activeMode = modeOptions.find((option) => option.id === chatMode) || modeOptions[0];
+
   return (
     <div className="border border-neutral-300 rounded-2xl bg-white shadow-sm px-3 pt-2.5 pb-2 transition-colors focus-within:border-neutral-500 focus-within:shadow-md min-w-0">
-      <div className="flex items-start gap-2 min-w-0">
+      <div className="flex items-start gap-1.5 min-w-0">
         <textarea
           ref={textareaRef}
           value={value}
           onChange={(e) => onChange(e.target.value)}
           onKeyDown={onKeyDown}
           placeholder={placeholder}
-          title="Enterで送信 · Shift+Enterで改行"
+          title={t('sendHint')}
           disabled={isLoading}
-          rows={2}
-          className="flex-1 min-w-0 resize-none outline-none text-base sm:text-sm leading-6 min-h-[52px] max-h-40 bg-transparent py-0.5 disabled:text-neutral-400 disabled:cursor-not-allowed"
+          rows={1}
+          className="flex-1 min-w-0 resize-none outline-none text-base sm:text-sm leading-6 min-h-[32px] max-h-40 bg-transparent py-1 disabled:text-neutral-400 disabled:cursor-not-allowed"
         />
+        <div className="relative shrink-0 pt-0.5" ref={modeMenuRef}>
+          <button
+            type="button"
+            disabled={isLoading}
+            onClick={() => setModeMenuOpen((open) => !open)}
+            className="inline-flex h-8 items-center gap-0.5 px-1.5 text-[12px] font-medium text-neutral-600 hover:text-neutral-900 disabled:opacity-50"
+            aria-haspopup="listbox"
+            aria-expanded={modeMenuOpen}
+            title={t('modeSelect')}
+          >
+            <span>{activeMode.label}</span>
+            <ChevronDown className={`h-3.5 w-3.5 text-neutral-400 transition-transform ${modeMenuOpen ? 'rotate-180' : ''}`} />
+          </button>
+          {modeMenuOpen && (
+            <div
+              role="listbox"
+              className="absolute top-full right-0 mt-1 w-60 overflow-hidden rounded-xl border border-neutral-200 bg-white py-1 shadow-lg z-30"
+            >
+              {modeOptions.map((option) => {
+                const selected = option.id === chatMode;
+                return (
+                  <button
+                    key={option.id}
+                    type="button"
+                    role="option"
+                    aria-selected={selected}
+                    onClick={() => {
+                      onChatModeChange(option.id);
+                      setModeMenuOpen(false);
+                    }}
+                    className={`flex w-full items-start gap-2 px-3 py-2.5 text-left hover:bg-neutral-50 ${
+                      selected ? 'bg-neutral-50' : ''
+                    }`}
+                  >
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-sm font-medium text-neutral-900">{option.label}</span>
+                      <span className="mt-0.5 block text-[11px] leading-4 text-neutral-500">{option.description}</span>
+                    </span>
+                    {selected && <Check className="mt-0.5 h-4 w-4 shrink-0 text-neutral-900" />}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
         <Button
           onClick={onSend}
           disabled={isLoading || !value.trim()}
@@ -1040,7 +1333,7 @@ function ChatComposer({
           {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
         </Button>
       </div>
-      <div className="mt-2 pt-1.5 border-t border-neutral-100">
+      <div className="mt-1.5 pt-1.5 border-t border-neutral-100">
         <SelectedDocumentsLine
           parts={documentParts}
           title={documentTitle}
@@ -1095,6 +1388,7 @@ function DocumentSetupModal({
   onSelectOperationManual: (doc: Document) => void;
   onClose: () => void;
 }) {
+  const { t } = useLocale();
   return (
     <div className="fixed inset-0 z-40 flex items-end sm:items-center justify-center p-0 sm:p-4">
       <div className="absolute inset-0 bg-neutral-900/40 backdrop-blur-[2px]" onClick={onClose} />
@@ -1107,13 +1401,13 @@ function DocumentSetupModal({
         <div className="px-4 sm:px-6 py-3 sm:py-4 border-b border-neutral-200 flex items-start justify-between gap-3">
           <div className="min-w-0">
             <h2 id="doc-setup-title" className="text-lg font-semibold tracking-tight">
-              ドキュメント設定
+              {t('documentSetup')}
             </h2>
             <p className="text-sm text-neutral-500 mt-0.5 break-words">
-              機種型式・機番・言語を指定して検索し、各マニュアルから1冊ずつ選択します。
+              {t('documentSetupHint')}
             </p>
           </div>
-          <Button variant="ghost" size="icon" onClick={onClose} title="閉じる" className="shrink-0">
+          <Button variant="ghost" size="icon" onClick={onClose} title={t('close')} className="shrink-0">
             <X className="h-4 w-4" />
           </Button>
         </div>
@@ -1122,28 +1416,28 @@ function DocumentSetupModal({
           <div className="flex flex-col sm:flex-row sm:items-end gap-2">
             <div className="min-w-0 sm:flex-[1.4]">
               <label className="block text-xs font-medium text-neutral-600 mb-1">
-                機種型式 <span className="text-red-500">*</span>
+                {t('modelLabel')} <span className="text-red-500">{t('required')}</span>
               </label>
               <input
                 type="text"
                 value={model}
                 onChange={(e) => onModelChange(e.target.value)}
-                placeholder="例: PC200-10M0"
+                placeholder={t('modelPlaceholder')}
                 className="w-full px-3 py-2 text-base sm:text-sm border border-neutral-300 rounded-lg focus:outline-none focus:border-neutral-500"
               />
             </div>
             <div className="min-w-0 sm:flex-1">
-              <label className="block text-xs font-medium text-neutral-600 mb-1">機番</label>
+              <label className="block text-xs font-medium text-neutral-600 mb-1">{t('serialLabel')}</label>
               <input
                 type="text"
                 value={serial}
                 onChange={(e) => onSerialChange(e.target.value)}
-                placeholder="任意"
+                placeholder={t('serialPlaceholder')}
                 className="w-full px-3 py-2 text-base sm:text-sm border border-neutral-300 rounded-lg focus:outline-none focus:border-neutral-500"
               />
             </div>
             <div className="w-full sm:w-[148px] shrink-0">
-              <label className="block text-xs font-medium text-neutral-600 mb-1">ドキュメント言語</label>
+              <label className="block text-xs font-medium text-neutral-600 mb-1">{t('documentLanguage')}</label>
               <select
                 value={language}
                 onChange={(e) => onLanguageChange(e.target.value)}
@@ -1162,7 +1456,7 @@ function DocumentSetupModal({
               className="w-full sm:w-auto shrink-0 gap-1.5"
             >
               {isSearching ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
-              検索
+              {t('search')}
             </Button>
           </div>
           {searchError && (
@@ -1176,18 +1470,18 @@ function DocumentSetupModal({
           {!hasSearched ? (
             <div className="h-full min-h-[180px] flex flex-col items-center justify-center text-center text-neutral-500">
               <Search className="h-8 w-8 text-neutral-300 mb-3" />
-              <div className="text-sm font-medium text-neutral-600">検索すると、ここにドキュメント一覧が表示されます</div>
-              <div className="text-xs mt-1">Shop Manual と Operation & Maintenance Manual からそれぞれ1冊選択できます</div>
+              <div className="text-sm font-medium text-neutral-600">{t('searchEmptyTitle')}</div>
+              <div className="text-xs mt-1">{t('searchEmptyHint')}</div>
             </div>
           ) : (
             <div className="space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <div className="text-xs font-semibold text-neutral-500 uppercase tracking-wide">ドキュメント一覧</div>
+                <div className="text-xs font-semibold text-neutral-500 uppercase tracking-wide">{t('documentList')}</div>
                 <div className="relative w-full sm:w-56">
                   <Search className="absolute left-2.5 top-2 h-4 w-4 text-neutral-400" />
                   <input
                     type="text"
-                    placeholder="結果を絞り込み…"
+                    placeholder={t('filterResults')}
                     value={docSearchQuery}
                     onChange={(e) => onDocSearchQueryChange(e.target.value)}
                     className="w-full pl-8 pr-3 py-1.5 text-sm border border-neutral-300 rounded-lg focus:outline-none focus:border-neutral-500"
@@ -1197,7 +1491,7 @@ function DocumentSetupModal({
               <div className="grid grid-cols-1 md:grid-cols-2 md:divide-x md:divide-neutral-200">
                 <div className="md:pr-5">
                   <DocumentSection
-                    title="Shop Manual"
+                    title={t('shopManual')}
                     count={sortedShopDocs.length}
                     documents={sortedShopDocs}
                     selectedDocument={selectedShopManual}
@@ -1208,7 +1502,7 @@ function DocumentSetupModal({
                 </div>
                 <div className="md:pl-5">
                   <DocumentSection
-                    title="Operation & Maintenance Manual"
+                    title={t('ommManual')}
                     count={sortedOperationDocs.length}
                     documents={sortedOperationDocs}
                     selectedDocument={selectedOperationManual}
@@ -1224,14 +1518,14 @@ function DocumentSetupModal({
 
         <div className="px-4 sm:px-6 py-3 sm:py-4 border-t border-neutral-200 bg-neutral-50 flex items-center justify-between gap-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
           <div className="text-xs text-neutral-500 min-w-0 break-words">
-            {selectedCount > 0 ? `${selectedCount}冊を選択中` : '各カテゴリから1冊ずつ選択できます'}
+            {selectedCount > 0 ? t('selectedCount', { count: selectedCount }) : t('selectOneEach')}
           </div>
           <div className="flex items-center gap-2 shrink-0">
             <Button variant="ghost" onClick={onClose} className="px-3">
-              キャンセル
+              {t('cancel')}
             </Button>
             <Button onClick={onClose} disabled={selectedCount === 0} className="px-3">
-              完了
+              {t('done')}
             </Button>
           </div>
         </div>
@@ -1327,15 +1621,16 @@ function DocumentSection({
   fallbackSerial?: string;
   onSelect: (doc: Document) => void;
 }) {
+  const { t } = useLocale();
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
         <div className="text-sm font-semibold text-neutral-700">{title}</div>
-        <div className="text-[11px] text-neutral-500">{count}件</div>
+        <div className="text-[11px] text-neutral-500">{t('countItems', { count })}</div>
       </div>
       {documents.length === 0 ? (
         <div className="rounded-lg border border-dashed border-neutral-200 px-3 py-4 text-xs text-neutral-500">
-          該当するドキュメントはありません。
+          {t('noDocuments')}
         </div>
       ) : (
         <div className="space-y-1">

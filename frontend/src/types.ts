@@ -4,6 +4,8 @@ export interface ThinkingStep {
   status: 'pending' | 'in_progress' | 'completed' | 'error';
   timestamp?: string;
   error?: string;
+  /** Present when this step calls GPT (e.g. none / low / medium / high). */
+  reasoningEffort?: string;
 }
 
 export interface ChatMessage {
@@ -17,6 +19,17 @@ export interface ChatMessage {
   activeThinkingSourceKey?: string;
   imageUrls?: string[];
   pdfUrls?: { title: string; url: string }[];
+  /** Latency from request start: first visible character / last character. */
+  answerTiming?: {
+    firstTokenMs: number;
+    completeMs?: number;
+    /** Backend: ms from answer-model call start to first Azure delta. */
+    modelFirstTokenMs?: number;
+    /** Frontend: ms between model_first_token SSE and first painted chunk. */
+    holdDelayMs?: number;
+  };
+  /** Reasoning effort used for the final answer GPT call. */
+  answerReasoningEffort?: string;
 }
 
 export interface Document {

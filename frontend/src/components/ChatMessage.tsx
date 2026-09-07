@@ -3,20 +3,38 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ThinkingProcess } from './ThinkingProcess';
 import { User, Bot, FileText } from 'lucide-react';
+import { formatReasoningEffortLabel, useLocale } from '../i18n';
 
 interface ChatMessageProps {
   message: ChatMessageType;
+  /** Live stream: render trailing incomplete lines as plain text for cheaper updates. */
+  streaming?: boolean;
   onOpenPdf?: (url: string, title?: string) => void;
   onOpenImage?: (url: string, alt?: string) => void;
 }
 
-export function ChatMessage({ message, onOpenPdf, onOpenImage }: ChatMessageProps) {
+export function ChatMessage({ message, streaming = false, onOpenPdf, onOpenImage }: ChatMessageProps) {
   const isUser = message.role === 'user';
+  const { t } = useLocale();
+
+  const splitStreamingContent = (content: string) => {
+    if (!streaming || !content) return { stable: content, trailing: '' };
+    const lastBreak = Math.max(content.lastIndexOf('\n\n'), content.lastIndexOf('\n'));
+    if (lastBreak < 0 || lastBreak > content.length - 12) {
+      // Short / single block: keep markdown for the whole thing once it has some length
+      if (content.length < 80) return { stable: '', trailing: content };
+      return { stable: content, trailing: '' };
+    }
+    return {
+      stable: content.slice(0, lastBreak + 1),
+      trailing: content.slice(lastBreak + 1),
+    };
+  };
 
   const isPdfUrl = (href?: string) => {
     if (!href) return false;
-    const clean = href.split('#')[0].split('?')[0];
-    return clean.toLowerCase().endsWith('.pdf');
+    const clean = href.split('#')[0].split('?')[0].toLowerCase();
+    return clean.endsWith('.pdf') || clean.includes('.pdf');
   };
 
   const resolveImageSrc = (src?: string) => {
@@ -61,7 +79,10 @@ export function ChatMessage({ message, onOpenPdf, onOpenImage }: ChatMessageProp
           <ThinkingProcess steps={message.thinkingSteps} />
         )}
 
-        {message.content && (
+        {message.content && (() => {
+          const { stable, trailing } = splitStreamingContent(message.content);
+          const markdownBody = stable || (!trailing ? message.content : '');
+          return (
           <div className="text-[14px] leading-6 text-neutral-800 break-words [overflow-wrap:anywhere]
             [&_h1]:text-xl [&_h1]:font-semibold [&_h1]:mt-4 [&_h1]:mb-2
             [&_h2]:text-lg [&_h2]:font-semibold [&_h2]:mt-4 [&_h2]:mb-2
@@ -76,6 +97,7 @@ export function ChatMessage({ message, onOpenPdf, onOpenImage }: ChatMessageProp
             [&_blockquote]:border-l-4 [&_blockquote]:border-neutral-300 [&_blockquote]:pl-3 [&_blockquote]:text-neutral-600 [&_blockquote]:my-2
             [&_th]:bg-neutral-100 [&_th]:border [&_th]:border-neutral-200 [&_th]:px-2 [&_th]:py-1 [&_th]:text-left
             [&_td]:border [&_td]:border-neutral-200 [&_td]:px-2 [&_td]:py-1 [&_td]:align-top">
+            {markdownBody ? (
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
               components={{
@@ -101,8 +123,15 @@ export function ChatMessage({ message, onOpenPdf, onOpenImage }: ChatMessageProp
                       <a
                         {...props}
                         href={href}
+                        onPointerDown={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          const title = typeof props.children === 'string' ? props.children : undefined;
+                          onOpenPdf(href!, title);
+                        }}
                         onClick={(e) => {
                           e.preventDefault();
+                          e.stopPropagation();
                           const title = typeof props.children === 'string' ? props.children : undefined;
                           onOpenPdf(href!, title);
                         }}
@@ -137,10 +166,20 @@ export function ChatMessage({ message, onOpenPdf, onOpenImage }: ChatMessageProp
                 },
               }}
             >
-              {message.content}
+              {markdownBody}
             </ReactMarkdown>
+            ) : null}
+            {trailing ? (
+              <div className="whitespace-pre-wrap break-words">
+                {trailing}
+                {streaming && <span className="inline-block w-1.5 h-4 ml-0.5 align-text-bottom bg-neutral-400 animate-pulse" />}
+              </div>
+            ) : (
+              streaming && <span className="inline-block w-1.5 h-4 ml-0.5 align-text-bottom bg-neutral-400 animate-pulse" />
+            )}
           </div>
-        )}
+          );
+        })()}
 
         {message.pdfUrls && message.pdfUrls.length > 0 && (
           <div className="flex flex-wrap gap-2">
@@ -148,9 +187,17 @@ export function ChatMessage({ message, onOpenPdf, onOpenImage }: ChatMessageProp
               <a
                 key={idx}
                 href={pdf.url}
+                onPointerDown={(e) => {
+                  if (onOpenPdf) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onOpenPdf(pdf.url, pdf.title);
+                  }
+                }}
                 onClick={(e) => {
                   if (onOpenPdf) {
                     e.preventDefault();
+                    e.stopPropagation();
                     onOpenPdf(pdf.url, pdf.title);
                   }
                 }}
@@ -165,7 +212,55 @@ export function ChatMessage({ message, onOpenPdf, onOpenImage }: ChatMessageProp
             ))}
           </div>
         )}
+
+        {(message.answerTiming || message.answerReasoningEffort) && (
+          <div className="text-[11px] leading-4 text-neutral-400 tabular-nums flex flex-wrap items-center gap-y-0.5">
+            {message.answerReasoningEffort && (
+              <span>
+                {t('answerModel')} · {formatReasoningEffortLabel(message.answerReasoningEffort, t)}
+              </span>
+            )}
+            {message.answerTiming && (
+              <>
+                {message.answerReasoningEffort && <span className="mx-1.5 text-neutral-300">·</span>}
+                <span>
+                  {t('answerStart')} {formatLatency(message.answerTiming.firstTokenMs)}
+                </span>
+                {typeof message.answerTiming.completeMs === 'number' && (
+                  <>
+                    <span className="mx-1.5 text-neutral-300">·</span>
+                    <span>
+                      {t('answerComplete')} {formatLatency(message.answerTiming.completeMs)}
+                    </span>
+                  </>
+                )}
+                {typeof message.answerTiming.modelFirstTokenMs === 'number' && (
+                  <>
+                    <span className="mx-1.5 text-neutral-300">·</span>
+                    <span>
+                      {t('modelTtft')} {formatLatency(message.answerTiming.modelFirstTokenMs)}
+                    </span>
+                  </>
+                )}
+                {typeof message.answerTiming.holdDelayMs === 'number' && (
+                  <>
+                    <span className="mx-1.5 text-neutral-300">·</span>
+                    <span>
+                      {t('holdDelay')} {formatLatency(message.answerTiming.holdDelayMs)}
+                    </span>
+                  </>
+                )}
+              </>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
+}
+
+function formatLatency(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return '—';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
 }

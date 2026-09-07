@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { ThinkingStep } from '../types';
 import { CheckCircle2, AlertCircle, Loader2, Circle, ChevronDown, ChevronRight } from 'lucide-react';
+import { formatReasoningEffortLabel, translateStepTitle, useLocale } from '../i18n';
 
 interface ThinkingProcessProps {
   steps: ThinkingStep[];
@@ -19,6 +20,7 @@ export function ThinkingProcess({
   onSourceChange,
 }: ThinkingProcessProps) {
   const [isOpen, setIsOpen] = useState(false);
+  const { locale, t } = useLocale();
 
   if (!steps || steps.length === 0) return null;
 
@@ -26,20 +28,20 @@ export function ThinkingProcess({
   const errored = steps.filter((s) => s.status === 'error').length;
   const current = steps.find((s) => s.status === 'in_progress');
 
-  const normalizeTitle = (t?: string) => (t || '').replace(/^Step\s*\d+[a-z]?:\s*/i, '');
   const activeSourceLabel = sources.find((source) => source.key === activeSourceKey)?.label || '';
 
   const title = live
     ? current
-      ? normalizeTitle(current.title)
+      ? translateStepTitle(current.title, locale)
       : errored
-      ? 'Finished with errors'
+      ? t('finishedWithErrors')
       : completed === steps.length
-      ? 'Done'
-      : 'Thinking…'
-    : 'Thinking Process';
+      ? t('thinkingDone')
+      : t('thinking')
+    : t('thinkingProcess');
 
   const visibleTitle = activeSourceLabel ? `${title} · ${activeSourceLabel}` : title;
+  const creatingAnswer = live && !current && !errored && completed === steps.length;
 
   return (
     <div className="border border-neutral-200 rounded-xl bg-white">
@@ -48,7 +50,7 @@ export function ThinkingProcess({
         onClick={() => setIsOpen((v) => !v)}
         className="w-full flex items-center gap-2 px-3 py-2 text-left"
       >
-        {live && current ? (
+        {live && (current || creatingAnswer) ? (
           <Loader2 className="h-4 w-4 text-blue-500 animate-spin shrink-0" />
         ) : errored ? (
           <AlertCircle className="h-4 w-4 text-red-500 shrink-0" />
@@ -106,14 +108,23 @@ export function ThinkingProcess({
                 </span>
                 <div className="flex-1 min-w-0">
                   <div
-                    className={`text-sm ${
+                    className={`text-sm flex flex-wrap items-baseline gap-x-2 gap-y-0.5 ${
                       step.status === 'pending' ? 'text-neutral-400' : 'text-neutral-800'
                     }`}
                   >
-                    {normalizeTitle(step.title)}
+                    <span>{translateStepTitle(step.title, locale)}</span>
+                    {step.reasoningEffort && (
+                      <span
+                        className={`text-[11px] font-normal tabular-nums ${
+                          step.status === 'pending' ? 'text-neutral-300' : 'text-neutral-400'
+                        }`}
+                      >
+                        {formatReasoningEffortLabel(step.reasoningEffort, t)}
+                      </span>
+                    )}
                   </div>
                   {step.description && (
-                    <div className="text-xs text-neutral-500 mt-0.5 break-words">{step.description}</div>
+                    <div className="text-xs text-neutral-500 mt-0.5 break-words whitespace-pre-wrap">{step.description}</div>
                   )}
                   {step.error && (
                     <div className="text-xs text-red-600 mt-0.5 break-words">Error: {step.error}</div>

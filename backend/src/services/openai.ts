@@ -6,6 +6,7 @@ import type { IncomingMessage } from 'node:http';
 import { config } from '../config';
 import {
   SearchQueriesResponse,
+  InitialQueryAndTocResponse,
   TOCChaptersResponse,
   AnswerabilityResponse,
   AnswerPattern,
@@ -15,6 +16,11 @@ import {
 } from '../types';
 
 type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
+
+/** Disable model reasoning on intermediate JSON steps (faster / cheaper). */
+export const CHAT_REASONING_EFFORT = 'none' as const;
+/** Final answer generation and chapter classification use light reasoning. */
+export const FINAL_ANSWER_REASONING_EFFORT = 'low' as const;
 
 function getInferenceClient(endpoint: string) {
   if (config.aiInference.authMode === 'entra_id') {
@@ -45,7 +51,10 @@ function isAzureResponsesUrl(url: string): boolean {
   return /\/openai\/responses/i.test(url);
 }
 
-async function responsesJson<T>(messages: ChatMessage[]): Promise<T> {
+async function responsesJson<T>(
+  messages: ChatMessage[],
+  reasoningEffort: typeof CHAT_REASONING_EFFORT | typeof FINAL_ANSWER_REASONING_EFFORT = CHAT_REASONING_EFFORT
+): Promise<T> {
   const url = requireNonEmpty(config.azureOpenAI.endpoint, 'AZURE_OPENAI_ENDPOINT');
   const apiKey = requireNonEmpty(config.azureOpenAI.apiKey, 'AZURE_OPENAI_API_KEY');
 
@@ -60,6 +69,7 @@ async function responsesJson<T>(messages: ChatMessage[]): Promise<T> {
       input: messages.map((m) => ({ role: m.role, content: [{ type: 'input_text', text: m.content }] })),
       // Best-effort JSON output enforcement
       response_format: { type: 'json_object' },
+      reasoning: { effort: reasoningEffort },
     }),
   });
 
@@ -82,7 +92,13 @@ async function responsesJson<T>(messages: ChatMessage[]): Promise<T> {
   return JSON.parse(text) as T;
 }
 
-async function streamResponses(userQuery: string, systemPrompt: string, historyMessages: ChatMessage[], onChunk: (chunk: string) => void): Promise<string> {
+async function streamResponses(
+  userQuery: string,
+  systemPrompt: string,
+  historyMessages: ChatMessage[],
+  onChunk: (chunk: string) => void,
+  reasoningEffort: typeof CHAT_REASONING_EFFORT | typeof FINAL_ANSWER_REASONING_EFFORT = FINAL_ANSWER_REASONING_EFFORT
+): Promise<string> {
   const url = requireNonEmpty(config.azureOpenAI.endpoint, 'AZURE_OPENAI_ENDPOINT');
   const apiKey = requireNonEmpty(config.azureOpenAI.apiKey, 'AZURE_OPENAI_API_KEY');
 
@@ -95,6 +111,7 @@ async function streamResponses(userQuery: string, systemPrompt: string, historyM
     body: JSON.stringify({
       model: requireNonEmpty(config.azureOpenAI.deployment, 'AZURE_OPENAI_DEPLOYMENT_NAME'),
       stream: true,
+      reasoning: { effort: reasoningEffort },
       input: [
         { role: 'system', content: [{ type: 'input_text', text: systemPrompt }] },
         ...historyMessages.map((m) => ({ role: m.role, content: [{ type: 'input_text', text: m.content }] })),
@@ -130,11 +147,11 @@ async function streamResponses(userQuery: string, systemPrompt: string, historyM
 
       try {
         const evt = JSON.parse(payload);
-        // Best-effort extraction across possible event shapes
+        // Prefer true deltas. Cumulative fields like output_text dump the whole answer at once.
         const deltaText =
+          (typeof evt?.delta === 'string' && evt.delta) ||
+          (typeof evt?.delta?.text === 'string' && evt.delta.text) ||
           evt?.delta?.content?.[0]?.text ||
-          evt?.response?.output_text ||
-          evt?.output_text ||
           evt?.choices?.[0]?.delta?.content;
 
         if (typeof deltaText === 'string' && deltaText.length > 0) {
@@ -161,6 +178,7 @@ type FinalAnswerAssetLookup = {
   imageUrlToBasename: Map<string, string>;
   pdfByTitle: Map<string, string>;
   pdfLinkTitles: Array<{ label: string; url: string }>;
+  pdfByRefId: Map<string, string>;
 };
 
 function normalizeAssetTitle(value: string): string {
@@ -248,9 +266,9 @@ function findPdfMarkdownLink(
   return null;
 }
 
-function skipImageToken(text: string, start: number): number | null {
+function skipAssetToken(text: string, start: number): number | null {
   const slice = text.slice(start, start + 12);
-  if (!/^\[\[\s*IMG\s*:/i.test(slice) && !/^\[\s*IMG\s*:/i.test(slice)) return null;
+  if (!/^\[\[\s*(IMG|PDF)\s*:/i.test(slice) && !/^\[\s*(IMG|PDF)\s*:/i.test(slice)) return null;
   const close = text.indexOf(']]', start);
   if (close < 0) return null;
   return close + 2;
@@ -269,7 +287,7 @@ function rewritePdfMarkdownLinks(
       break;
     }
     output += text.slice(index, open);
-    const imageEnd = skipImageToken(text, open);
+    const imageEnd = skipAssetToken(text, open);
     if (imageEnd != null) {
       output += text.slice(open, imageEnd);
       index = imageEnd;
@@ -353,6 +371,7 @@ function extractFinalAnswerAssetLookup(contextText: string): FinalAnswerAssetLoo
   const imageUrlToBasename = new Map<string, string>();
   const pdfByTitle = new Map<string, string>();
   const pdfLinkTitles: Array<{ label: string; url: string }> = [];
+  const pdfByRefId = new Map<string, string>();
   let pendingPdfTitle = '';
 
   let pendingImageTitle = '';
@@ -428,11 +447,18 @@ function extractFinalAnswerAssetLookup(contextText: string): FinalAnswerAssetLoo
     }
   }
 
-  return { imageByTitle, imageUrlToBasename, pdfByTitle, pdfLinkTitles };
+  return { imageByTitle, imageUrlToBasename, pdfByTitle, pdfLinkTitles, pdfByRefId };
 }
 
 function rewriteFinalAnswerArtifacts(answerText: string, lookup: FinalAnswerAssetLookup): string {
   let rewritten = answerText;
+
+  rewritten = rewritten.replace(/\[\[\s*PDF\s*:\s*(shop-\d+)\s*\]\]/gi, (match, refId) => {
+    return lookup.pdfByRefId.get(String(refId).toLowerCase()) || match;
+  });
+  rewritten = rewritten.replace(/\[(shop-\d+)\]/gi, (match, refId) => {
+    return lookup.pdfByRefId.get(String(refId).toLowerCase()) || match;
+  });
 
   // Fix bare image filename references the model sometimes emits, e.g., "!diagram_page_4203_1.jpg".
   rewritten = rewritten.replace(/!([^\S\r\n]*)([a-zA-Z0-9_.-]+\.(?:jpg|jpeg|png|gif|webp))/gi, (match, ws, fileName) => {
@@ -563,60 +589,21 @@ interface AnswerLanguageResponse {
   reason: string;
 }
 
-export async function detectMultiErrorCodes(
-  userQuery: string,
-  extractedErrorCodes: string[] = [],
-  chatHistory: any[] = []
-): Promise<MultiErrorCodeDetection> {
-  try {
-    const historyContext = chatHistory
-      .slice(-6)
-      .map((m) => `${m.role}: ${m.content}`)
-      .join('\n');
-
-    return await chatJson<MultiErrorCodeDetection>([
-      {
-        role: 'system',
-        content: `You are an assistant that detects whether the user is asking about multiple error codes.
-
-Rules:
-1. Decide if the query is about diagnosing TWO OR MORE distinct error codes.
-2. Use only information present in the User Query, Recent Chat History, and Extracted Error Codes.
-3. Do NOT invent error codes.
-4. Normalize codes (trim spaces, keep original casing) and deduplicate.
-5. Return JSON only.
-
-Output JSON format:
-{
-  "is_multi_error_codes": true,
-  "error_codes": ["CA441", "CA442"],
-  "reason": "..."
-}`,
-      },
-      {
-        role: 'user',
-        content: `User Query:\n${userQuery}\n\nExtracted Error Codes (from previous step):\n${JSON.stringify(
-          extractedErrorCodes
-        )}\n\nRecent Chat History (most recent last):\n${historyContext}`,
-      },
-    ]);
-  } catch (error) {
-    console.error('Error detecting multi error codes:', error);
-    const unique = Array.from(new Set((extractedErrorCodes || []).filter(Boolean)));
-    return {
-      is_multi_error_codes: unique.length >= 2,
-      error_codes: unique,
-      reason: 'fallback: detection failed',
-    };
-  }
-}
-
 function hasConnectorContext(combinedContext: string): boolean {
   return /(?:^|\n)EXTRACTED_CONNECTORS:\s*(?!\n)\S/.test(combinedContext) || /\(CONNECTOR\)/.test(combinedContext);
 }
 
-function buildConnectorSectionPrompt(multiError: { isMulti: boolean; codes?: string[] } = { isMulti: false }): string {
+function buildConnectorSectionPrompt(
+  multiError: { isMulti: boolean; codes?: string[] } = { isMulti: false },
+  patterns: AnswerPattern[] = []
+): string {
   const codes = Array.isArray(multiError.codes) ? multiError.codes.filter(Boolean) : [];
+  const isFaultDiagnosis = patterns.some((pattern) => pattern === 'single_fault' || pattern === 'multi_fault')
+    || multiError.isMulti;
+  const faultDiagnosisImageRule = isFaultDiagnosis
+    ? `
+   - FAULT DIAGNOSIS (MANDATORY): This is troubleshooting / error-code diagnosis. You MUST include the connector 3D layout diagram (コネクタ立体配置図, 立体配置図, connector layout, connector location, 3D diagram) immediately after the connector table whenever any CONNECTOR Document Ref lists such an image file name. Never omit this image for fault diagnosis. Include every layout image needed to cover all connector rows in the table.`
+    : '';
   const perCodeRule = multiError.isMulti && codes.length >= 2
     ? `
    - MULTI-CODE: output one connector subsection per error code, "### {CODE}", each with its OWN table in the format above AND its own 3D layout image(s) immediately after that table. Add a "共通のコネクタ" subsection only for connectors that appear in MAIN \`context:\` for ALL listed codes.
@@ -644,7 +631,7 @@ CONNECTOR SECTION (MANDATORY - the Context contains connector information):
      - Pick images whose caption/OCR indicates a layout/location view (コネクタ立体配置図, 立体配置図, connector layout, connector location, 3D diagram) AND that mention the same connector number as a table row.
      - Insert TWO OR MORE images when several are needed to cover all rows (e.g., a "(1)(2)(3)" series or different mounting locations).
      - If a CONNECTOR Document Ref lists any image file name, you MUST insert at least one image here.
-     - A wiring/circuit diagram (回路図, 配線図, wiring diagram, circuit diagram, schematic) is NOT a valid substitute. If only those exist, insert no image and write: "立体配置図は提示された資料内で確認できません（回路図/配線図は代替として使用しません）".${perCodeRule}
+     - A wiring/circuit diagram (回路図, 配線図, wiring diagram, circuit diagram, schematic) is NOT a valid substitute. If only those exist, insert no image and write: "立体配置図は提示された資料内で確認できません（回路図/配線図は代替として使用しません）".${faultDiagnosisImageRule}${perCodeRule}
    - If the Context includes a non-empty "EXTRACTED_COMPONENTS:" line, also output "## Related Component Information" listing each component with its location/mounting info and citations, placed after the connector section.
 `;
 }
@@ -655,30 +642,31 @@ function buildFinalAnswerSystemPromptBase(combinedContext: string): string {
 Answer Creation Rules:
 0. Language (CRITICAL / ABSOLUTE HIGHEST PRIORITY): Always write the entire answer in the same language as the user's question, regardless of the document language. This applies to the summary, headings, bullets, tables, connector labels, citations text around links, and all explanatory text. If the user's question mixes languages, follow the dominant language of the question. Do not switch to the document language unless the user explicitly asks for it. Never default to Japanese just because the documents are Japanese.
 1. Summary (CRITICAL): Begin every answer with a 3-4 sentence summary that tells the user the overall conclusion, what to do first, and what kind of answer follows.
-2. Completeness: Reproduce every procedure step, numeric value (torque, clearance, part number), pass/fail criterion, and explicit condition found in MAIN Document Refs. Also reproduce connector facts from CONNECTOR Document Refs when connector information is required. Do not shorten or summarize them away. Do NOT reproduce procedure text, tables, or explanations from SUB Document Refs.
+2. Completeness: Reproduce every procedure step, numeric value (torque, clearance, part number), pass/fail criterion, and explicit condition found in MAIN Document Refs. Also reproduce connector facts from CONNECTOR Document Refs when connector information is required. Do not shorten or summarize them away. From SUB Document Refs, include supporting procedures, specs, criteria, and explanations when they help answer the question; keep the amount proportional to need (key steps and values, not an unnecessary full dump of every SUB chapter).
 3. Safety: Clearly mark warnings (▼) and cautions (!) at relevant steps.
 4. No Hallucination: Do not write facts that are not explicitly in the provided Context.
 5. No Chapter Mixing: Do not mix procedures from different chapters into one step, and only insert images that belong to the SAME Document Ref block as the text you are describing.
 5b. Document Ref roles (CRITICAL) — follow CHAPTER_CLASSIFICATION_JSON and the (MAIN) / (SUB) / (CONNECTOR) labels on each Document Ref:
-   - MAIN: Write the answer body from these refs (procedures, specifications, explanations, images).
-   - SUB: Do NOT write SUB chapter content as answer prose, steps, tables, or images. For each SUB ref, display only its PDF_CITATION_MARKDOWN (the PDF link). If a MAIN passage says "〜を参照" / "see ...", turn that mention into the matching SUB PDF link. Unused SUB links may be listed at the end under a short "Related documents" / "関連資料" heading that contains links only.
-   - CONNECTOR: You MAY and SHOULD write connector information in the answer body (tables, pin counts, installation position, 3D layout images) using CONNECTOR refs. CONNECTOR is not treated like SUB.
+   - MAIN: Primary source for the answer body (procedures, specifications, explanations, images).
+   - SUB: Supporting / referenced chapters. You MAY and SHOULD write SUB content into the answer when it is needed to complete the procedure, explain a cross-reference, or supply specs the user needs. Prefer a concise, useful excerpt (the relevant steps, tables, values, and warnings) rather than pasting the entire SUB chapter. Always attach that SUB ref's PDF citation token next to the SUB-derived content. If a MAIN passage says "〜を参照" / "see ...", expand the needed SUB details in place (not link-only) and still include the matching SUB PDF token. Unused SUB refs that were not quoted may be listed briefly at the end under "Related documents" / "関連資料".
+   - CONNECTOR: You MAY and SHOULD write connector information in the answer body (tables, pin counts, installation position, 3D layout images) using CONNECTOR refs.
 6. Structure: Choose natural headings that match the question and the Context. Do not force a fixed structure beyond what the ANSWER MODE and CONNECTOR SECTION rules below require.
 7. Readability: Use Markdown tables for specification values, pin assignments, inspection steps with criteria, and parts lists with torque/clearance. Keep paragraphs short; prefer headings, bullets, and tables over walls of text.
 8. Citations:
-   - Cite with the "PDF_CITATION_MARKDOWN" strings from the Context, copied byte-for-byte. Never invent, shorten, or re-encode a URL, and never use "#", "javascript:", or "localhost".
-   - Place one citation at the end of each procedure step or each short paragraph ONLY when that step's evidence is in that same Document Ref. Do not stamp the enclosing error-code chapter onto a step that is a cross-reference to another chapter.
-   - MULTI-CODE (CRITICAL): Inside "### {CODE}", procedure citations that are not cross-refs MUST be that code's own MAIN PDF_CITATION_MARKDOWN (e.g. FAILURE CODE [CA441] steps cite CA441, never CA144). Never reuse another code's citation in that subsection.
-   - Each citation must come from the Document Ref that actually contains the evidence. If a sentence combines several refs, attach one link per ref.
-   - If a Document Ref has no PDF_CITATION_MARKDOWN, write its title as plain text.
+   - Cite with \`[[PDF:<ref_id>]]\` using the PDF_CITATION_TOKEN / PDF_CITATION_ID from the SAME Document Ref (e.g. [[PDF:shop-1]]). The backend inserts the real URL.
+   - FORBIDDEN: writing any http(s) URL, SAS query string, or copying a long markdown link. Never invent, shorten, or re-encode a URL, and never use "#", "javascript:", or "localhost".
+   - Place one citation token at the end of each procedure step or each short paragraph ONLY when that step's evidence is in that same Document Ref. Do not stamp the enclosing error-code chapter onto a step that is a cross-reference to another chapter.
+   - MULTI-CODE (CRITICAL): Inside "### {CODE}", procedure citations that are not cross-refs MUST be that code's own MAIN PDF token (e.g. FAILURE CODE [CA441] steps use that code's [[PDF:shop-N]], never another code's token).
+   - Each citation must come from the Document Ref that actually contains the evidence. If a sentence combines several refs, attach one token per ref.
+   - If a Document Ref has no PDF_CITATION_TOKEN, write its title as plain text.
    - No links inside tables, except a "参照" / "参考" / "Reference" column.
-   - Never output raw "[shop-N]" tags, decorative markers ("cite", "★", "☆", "■"), or an image file name as a citation.
-9. Cross-chapter References: When a MAIN step says "〜を参照", "refer to ...", "see ...", or names another chapter (e.g. CHECKS BEFORE TROUBLESHOOTING, CHECK ELECTRIC EQUIPMENT, RELATED INFORMATION FOR TROUBLESHOOTING), that mention MUST become that chapter's own PDF_CITATION_MARKDOWN. Do NOT replace it with the parent FAILURE CODE chapter link. Match by title (ignore punctuation / extra brackets). If no Document Ref matches, leave the chapter name as plain text.
+   - Never output raw "[shop-N]" tags (use [[PDF:shop-N]] instead), decorative markers ("cite", "★", "☆", "■"), or an image file name as a citation.
+9. Cross-chapter References: When a MAIN step says "〜を参照", "refer to ...", "see ...", or names another chapter (e.g. CHECKS BEFORE TROUBLESHOOTING, CHECK ELECTRIC EQUIPMENT, RELATED INFORMATION FOR TROUBLESHOOTING), include the needed content from that chapter's Document Ref (usually SUB) at an appropriate length, and cite it with that chapter's own [[PDF:shop-N]] token. Do NOT replace it with the parent FAILURE CODE chapter token. Match by title (ignore punctuation / extra brackets). If no Document Ref matches, leave the chapter name as plain text.
 10. Images - you MUST NOT write image URLs; the backend inserts them:
     - Insert an image by writing \`[[IMG:<file name>]]\` on its own line, using a file name that literally appears in an "Image:" line or the "available_images" list of the SAME Document Ref.
     - FORBIDDEN: \`![name.jpg](...)\`, \`!name.jpg\`, or a bare \`name.jpg\` as a paragraph. Never invent a file name.
     - Place the token right after the sentence or step it illustrates; never collect images at the end.
-    - Coverage: insert a token for every procedure step, inspection item, connector, component, and figure reference that has a matching file name in a MAIN or CONNECTOR Document Ref. Prefer completeness. Do not insert images from SUB refs.
+    - Coverage: insert a token for every procedure step, inspection item, connector, component, and figure reference that has a matching file name in a MAIN, CONNECTOR, or SUB Document Ref whose content you are actually using. Prefer completeness for MAIN/CONNECTOR; for SUB, insert images only when they illustrate the SUB excerpt you included.
     - Do not put tokens inside tables, and do not mention the file name in the prose.
 11. Required Tools: Output a "## Required Tools" table at the end when the Context lists tools or the question involves assembly, disassembly, maintenance, or diagnostics.
 
@@ -694,6 +682,7 @@ function buildPatternSpecificPrompt(pattern: AnswerPattern): string {
 ANSWER MODE - Single Fault / One Error Code:
    - Use the structure: Overview → Preconditions → Procedure → Decision/Diagnosis → Verification.
    - Reproduce the FULL sequence of steps, criteria, numeric values, and decision branches from the Context.
+   - When connector information is present, always include the connector 3D layout diagram (立体配置図) after the connector table.
 `;
     case 'assembly':
       return `
@@ -708,12 +697,14 @@ ANSWER MODE - Assembly / Disassembly:
 ANSWER MODE - Multiple Fault Codes:
    - Start with the common suspected components and the first inspection points, then a shared inspection procedure if one exists.
    - Then handle each error code in its own "### {CODE}" subsection. Never infer commonality across codes: an item belongs to a common section only if the Context says it applies to ALL codes.
+   - For each error-code subsection that has connector information, always include the connector 3D layout diagram (立体配置図) after that code's connector table.
 `;
     case 'maintenance':
       return `
 
 ANSWER MODE - Periodic Maintenance:
-   - Never answer with only a list of items. For each maintenance item give the step-by-step procedure, warnings, tools, and torque/clearance values from the Context.
+   - Immediately after the opening 3-4 sentence summary, output a compact list (or table) of the maintenance items to be performed. Do not put this list at the end.
+   - Never answer with only that list. After the list, for each maintenance item give the step-by-step procedure, warnings, tools, and torque/clearance values from the Context.
    - Use tables for intervals, checks, and criteria.
 `;
     case 'general':
@@ -815,53 +806,110 @@ function buildFinalAnswerSystemPromptMulti(
   );
 }
 
-export async function selectTOCChaptersInitial(
-  queries: string[],
+export async function generateSearchQueriesAndInitialToc(
   userQuery: string,
-  tocContent: string
-): Promise<TOCChaptersResponse> {
+  tocContent: string,
+  chatHistory: any[] = []
+): Promise<InitialQueryAndTocResponse> {
+  const historyContext = chatHistory
+    .slice(-6)
+    .map((m) => `${m.role}: ${m.content}`)
+    .join('\n');
+  const hasToc = Boolean(tocContent && tocContent.trim());
+
   try {
-    return await chatJson<TOCChaptersResponse>([
+    const response = await chatJson<InitialQueryAndTocResponse>([
       {
         role: 'system',
         content:
-          'Select the most relevant TOC path values for the user question. Prefer the deepest, most specific entries you can find.',
-      },
-      {
-        role: 'user',
-        content: `Select a SMALL set of relevant TOC path values for the user question.
+          `You prepare the first retrieval plan for a technical documentation search system.
 
-## Rules
-1. Return the EXACT path strings as they appear in the TOC (one path per line).
+## Task
+In ONE response:
+1) Generate effective search queries from the user question (and recent chat history).
+2) If a Table of Contents is provided, select the most relevant TOC path values for the INITIAL search.
+
+## What to Extract into queries
+- error codes / fault codes (e.g., CA441)
+- part numbers, TSI, PSN, serial-like identifiers
+- component names, connector IDs (when explicitly mentioned)
+- maintenance-related terms and periodic inspection terms when the question is about operation and maintenance manuals
+
+## Conversation Context (IMPORTANT)
+- If chat history is provided, you MUST use it to resolve omitted context in the current user query.
+- Do NOT invent identifiers that do not appear in the user query or recent chat history.
+
+## Query rules
+- If no identifiers are found, return the original user query as a single query.
+- Set has_codes true only when at least one error/fault code appears in the query or recent history.
+
+## TOC path rules (only when TOC is provided)
+1. Return the EXACT path strings as they appear in the TOC.
 2. Prefer leaf-level / deepest / most specific paths over parent paths.
 3. Be as specific as possible and include low-level paths whenever they are relevant.
 4. Do NOT return titles. Return path values only.
 5. Be helpful but not exhaustive. This is the INITIAL path selection.
 6. Maintenance (OMM / 取扱説明書): If the query is about maintenance, メンテナンス, periodic maintenance, or 定期点検, and a Maintenance/Periodic Maintenance parent exists, also include its child maintenance item/detail paths, not just the schedule/interval parent.
-6. Return JSON only.
+7. If no TOC is provided, return "chapters": [].
 
-## Output Format
+## Output
+Return JSON only:
 {
-  "chapters": ["XXXXXXXX", "XXXXXXXXX"]
-}
+  "queries": ["query1", "query2"],
+  "has_codes": true,
+  "chapters": ["path/from/toc", "another/path"]
+}`,
+      },
+      {
+        role: 'user',
+        content: `User Query: ${userQuery}
 
-## Search Queries
-${JSON.stringify(queries)}
-
-## User Query
-${userQuery}
+Recent Chat History (most recent last):
+${historyContext}
 
 ## Table of Contents
-${tocContent}`,
+${hasToc ? tocContent : '(No TOC provided — return chapters as an empty array.)'}`,
       },
     ]);
+
+    const queries = Array.isArray(response?.queries) && response.queries.length > 0
+      ? response.queries.map((q) => String(q || '').trim()).filter(Boolean)
+      : [userQuery];
+    const chapters = hasToc && Array.isArray(response?.chapters)
+      ? response.chapters.map((c) => String(c || '').trim()).filter(Boolean)
+      : [];
+
+    return {
+      queries,
+      has_codes: !!response?.has_codes,
+      chapters,
+    };
   } catch (error) {
-    console.error('Error selecting initial TOC chapters:', error);
-    return { chapters: [] };
+    console.error('Error generating search queries and initial TOC paths:', error);
+    return { queries: [userQuery], has_codes: false, chapters: [] };
   }
 }
 
-async function chatJson<T>(messages: ChatMessage[]): Promise<T> {
+export async function selectTOCChaptersInitial(
+  queries: string[],
+  userQuery: string,
+  tocContent: string
+): Promise<TOCChaptersResponse> {
+  const combined = await generateSearchQueriesAndInitialToc(userQuery, tocContent, []);
+  // Prefer chapters from the combined call; queries arg is retained for API compatibility.
+  void queries;
+  return { chapters: combined.chapters };
+}
+
+export async function generateSearchQueries(userQuery: string, chatHistory: any[] = []): Promise<SearchQueriesResponse> {
+  const combined = await generateSearchQueriesAndInitialToc(userQuery, '', chatHistory);
+  return { queries: combined.queries, has_codes: combined.has_codes };
+}
+
+async function chatJson<T>(
+  messages: ChatMessage[],
+  reasoningEffort: typeof CHAT_REASONING_EFFORT | typeof FINAL_ANSWER_REASONING_EFFORT = CHAT_REASONING_EFFORT
+): Promise<T> {
   // Prefer Foundry inference endpoint; fallback to Azure OpenAI Responses API if configured.
   if (config.aiInference.endpoint) {
     const endpoint = requireNonEmpty(getChatEndpoint(), 'AZURE_AI_INFERENCE_ENDPOINT');
@@ -872,7 +920,8 @@ async function chatJson<T>(messages: ChatMessage[]): Promise<T> {
         model,
         messages,
         response_format: { type: 'json_object' },
-      },
+        reasoning_effort: reasoningEffort,
+      } as any,
     });
 
     if (isUnexpected(response)) {
@@ -887,7 +936,7 @@ async function chatJson<T>(messages: ChatMessage[]): Promise<T> {
   }
 
   if (config.azureOpenAI.endpoint && isAzureResponsesUrl(config.azureOpenAI.endpoint)) {
-    return responsesJson<T>(messages);
+    return responsesJson<T>(messages, reasoningEffort);
   }
 
   throw new Error('No chat endpoint configured. Set AZURE_AI_INFERENCE_ENDPOINT or AZURE_OPENAI_ENDPOINT (Responses API URL).');
@@ -913,43 +962,6 @@ export async function getTextEmbedding(input: string): Promise<number[]> {
     throw new Error('Embedding returned empty vector');
   }
   return embedding;
-}
-
-export async function generateSearchQueries(userQuery: string, chatHistory: any[] = []): Promise<SearchQueriesResponse> {
-  try {
-    return await chatJson<SearchQueriesResponse>([
-      {
-        role: 'system',
-        content:
-          `Your goal is to generate effective search queries for a technical documentation search system.
-
-## What to Extract
-- error codes / fault codes (e.g., CA441)
-- part numbers, TSI, PSN, serial-like identifiers
-- component names, connector IDs (when explicitly mentioned)
-- maintenance-related terms and periodic inspection terms when the question is about operation and maintenance manuals
-
-## Conversation Context (IMPORTANT)
-- If chat history is provided, you MUST use it to resolve omitted context in the current user query.
-- Do NOT invent identifiers that do not appear in the user query or recent chat history.
-
-## Output
-- Output JSON format only: {"queries": ["query1", "query2"], "has_codes": true/false}
-- If no identifiers are found, return the original user query as a single query.
-`,
-      },
-      {
-        role: 'user',
-        content: `User Query: ${userQuery}\n\nRecent Chat History (most recent last):\n${chatHistory
-          .slice(-6)
-          .map((m) => `${m.role}: ${m.content}`)
-          .join('\n')}`,
-      },
-    ]);
-  } catch (error) {
-    console.error('Error generating search queries:', error);
-    return { queries: [userQuery], has_codes: false };
-  }
 }
 
 export type SearchedChapterRef = { title: string; path: string };
@@ -1077,11 +1089,11 @@ export async function extractElements(
     // Build chat history context
     const historyContext = chatHistory.slice(-4).map(m => `${m.role}: ${m.content}`).join('\n');
     
-    return await chatJson<ExtractedElements>([
+    const response = await chatJson<ExtractedElements>([
       {
         role: 'system',
         content:
-`You are an expert in analyzing technical documents in Japanese and English. Based only on the user query and the provided Document Content, determine whether additional search is needed and extract the information required for that search.
+`You are an expert in analyzing technical documents in Japanese and English. Based only on the user query and the provided Document Content, determine whether additional search is needed and extract the information required for that search. Also decide whether the user is asking about multiple error codes.
 
 ## Output Format
 
@@ -1094,7 +1106,10 @@ Return a JSON object with all fields:
 "diagnostic_chapters": [],
 "components": [],
 "reasoning": "",
-"needs_followup": false
+"needs_followup": false,
+"is_multi_error_codes": false,
+"multi_error_codes": [],
+"multi_error_reason": ""
 }
 
 ## Extraction Rules
@@ -1104,8 +1119,13 @@ Return a JSON object with all fields:
 * If the provided content is TOC-like or chapter-list-like, prefer extracting chapter titles exactly as they appear instead of rewriting them.
 * When Retrieved Chapter Content contains "see", "refer to", "for details, see", or "〜を参照", extract those destination chapter titles into reference_chapters even if they also appear in the TOC. Do not skip them just because they are mentioned in the already-retrieved body text.
 * error_codes: Extract explicit error or failure codes only when sufficient information about them has not already been found in the Document Content.
-* connectors: Extract explicit connector IDs ONLY when the user query is explicitly about connectors, wiring, error codes, diagnostics, or inspection. Take IDs only from chapter body text (Document Content), never from image captions, OCR, figure callouts, or 3D layout diagram labels. Do NOT include connector list/layout or 3D layout diagram chapter names for unrelated queries such as weight, maintenance, assembly/disassembly, or specifications. Do NOT copy an entire connector catalog.
-* reference_chapters: Extract chapter or section titles explicitly referenced by phrases such as "see", "refer to", "for details, see", or "〜を参照". Include titles such as TEST ENGINE OIL PRESSURE, CHECKS BEFORE TROUBLESHOOTING, and CHECK ELECTRIC EQUIPMENT when they are named as a reference. Do NOT include connector list/layout or 3D layout diagram chapter(s) here unless the query is about connectors or diagnostics.
+* connectors: Extract connector IDs when the user query is about error codes, fault diagnosis, troubleshooting, inspection, wiring, or connectors.
+  - Primary source: chapter BODY text in Retrieved Chapter Content (diagnostic/troubleshooting chapters). Extract every connector ID explicitly mentioned in prose or tables there.
+  - Common ID formats: E08, E12, J1, VE03, AC01, T01 (letter(s) + digits). Even when the word "connector"/"コネクタ" is absent, treat such IDs as connectors when they appear in diagnostic procedure text or connector-related table rows.
+  - Also include connector IDs the user explicitly names in the query when the query is connector/diagnostic related.
+  - FORBIDDEN sources: image captions, OCR, figure callouts, 3D layout diagram labels, connector-list catalog chapter titles, and copying an entire connector catalog.
+  - Do NOT include connector list/layout or 3D layout diagram chapter names in this field; those belong in reference_chapters only when diagnostic follow-up is needed.
+* reference_chapters: Extract chapter or section titles explicitly referenced by phrases such as "see", "refer to", "for details, see", or "〜を参照". Include titles such as TEST ENGINE OIL PRESSURE, CHECKS BEFORE TROUBLESHOOTING, and CHECK ELECTRIC EQUIPMENT when they are named as a reference. For fault diagnosis, also include connector list/layout and 3D layout diagram chapter titles when diagnostic chapters mention connectors or when connector IDs were found in chapter body text. Do NOT include unrelated connector chapters for weight, maintenance, assembly/disassembly, or specification queries.
 * diagnostic_chapters: Extract chapter titles that are explicitly related to troubleshooting, diagnosis, or inspection.
 * components: Extract up to two primary components involved.
 * reasoning: Briefly explain what information is available and what is missing.
@@ -1117,6 +1137,15 @@ Return a JSON object with all fields:
 
   * the current Document Content is insufficient, or
   * any value is extracted into error_codes, connectors, reference_chapters, or diagnostic_chapters.
+
+## Multiple error-code Rules
+* Decide if the query is about diagnosing TWO OR MORE distinct error codes.
+* Use only information present in the User Query, Chat History, and Document Content / extracted error_codes.
+* Do NOT invent error codes.
+* Normalize codes (trim spaces, keep original casing) and deduplicate.
+* Set is_multi_error_codes true only for two or more distinct codes that the user is diagnosing together.
+* multi_error_codes: the list of those codes when is_multi_error_codes is true; otherwise [].
+* multi_error_reason: short explanation of the multi-code decision.
 
 Return JSON only.`,
       },
@@ -1131,6 +1160,30 @@ Document Content / TOC:
 ${textContext}`,
       },
     ]);
+
+    const errorCodes = Array.isArray(response?.error_codes)
+      ? response.error_codes.map((c) => String(c || '').trim()).filter(Boolean)
+      : [];
+    const multiCodesRaw = Array.isArray(response?.multi_error_codes)
+      ? response.multi_error_codes.map((c) => String(c || '').trim()).filter(Boolean)
+      : [];
+    const multiCodes = Array.from(new Set(multiCodesRaw.length > 0 ? multiCodesRaw : errorCodes));
+    const isMulti = !!response?.is_multi_error_codes && multiCodes.length >= 2;
+
+    return {
+      error_codes: errorCodes,
+      connectors: Array.isArray(response?.connectors) ? response.connectors : [],
+      reference_chapters: Array.isArray(response?.reference_chapters) ? response.reference_chapters : [],
+      diagnostic_chapters: Array.isArray(response?.diagnostic_chapters) ? response.diagnostic_chapters : [],
+      components: Array.isArray(response?.components) ? response.components : [],
+      reasoning: typeof response?.reasoning === 'string' ? response.reasoning : '',
+      needs_followup: !!response?.needs_followup,
+      is_multi_error_codes: isMulti,
+      multi_error_codes: isMulti ? multiCodes : [],
+      multi_error_reason: typeof response?.multi_error_reason === 'string'
+        ? response.multi_error_reason
+        : (isMulti ? 'multiple error codes detected' : 'single or no error code'),
+    };
   } catch (error) {
     console.error('Error extracting elements:', error);
     return {
@@ -1141,8 +1194,29 @@ ${textContext}`,
       components: [],
       reasoning: 'Error occurred',
       needs_followup: false,
+      is_multi_error_codes: false,
+      multi_error_codes: [],
+      multi_error_reason: 'fallback: extraction failed',
     };
   }
+}
+
+export async function detectMultiErrorCodes(
+  userQuery: string,
+  extractedErrorCodes: string[] = [],
+  chatHistory: any[] = []
+): Promise<MultiErrorCodeDetection> {
+  // Kept for compatibility. Prefer extractElements(), which now includes multi-error detection.
+  void userQuery;
+  void chatHistory;
+  const unique = Array.from(new Set((extractedErrorCodes || []).filter(Boolean)));
+  return {
+    is_multi_error_codes: unique.length >= 2,
+    error_codes: unique,
+    reason: unique.length >= 2
+      ? 'fallback: derived from extracted error codes (merged into extractElements)'
+      : 'fallback: fewer than two extracted error codes',
+  };
 }
 
 export async function classifyChapters(
@@ -1203,7 +1277,7 @@ Return JSON only, using index numbers:
 "ignore": [3]
 }`,
       },
-    ]);
+    ], FINAL_ANSWER_REASONING_EFFORT);
   } catch (error) {
     console.error('Error classifying chapters:', error);
     return { main: [], connector: [], sub: [], ignore: [] };
@@ -1334,7 +1408,7 @@ MULTIPLE ERROR CODES (MANDATORY STRUCTURE):
    - Use exactly these section headings, in this order:
      1) ${headings.summary} — list all error codes and what they share.
      2) ${headings.commonInspection} — items that apply to ALL codes. Table: ${useJapanese ? '項目 | 手順 | 判定基準 | 参考' : 'Item | Procedure | Criteria | Reference'}.
-     3) ${headings.perCodeDiagnosis} — one "### {CODE}" subsection per code, each as detailed as a single-code answer (full steps, criteria, values). Citations in that subsection must be that code's MAIN PDF except when a step cross-references another chapter, in which case use that chapter's PDF_CITATION_MARKDOWN.
+     3) ${headings.perCodeDiagnosis} — one "### {CODE}" subsection per code, each as detailed as a single-code answer (full steps, criteria, values). Citations in that subsection must be that code's MAIN [[PDF:shop-N]] token except when a step cross-references another chapter, in which case use that chapter's token.
      4) ${headings.commonConnectors} — only connector numbers that appear in MAIN \`context:\` for ALL codes. Never take extra IDs from image Caption/OCR or from a full connector-list catalog (see the CONNECTOR SECTION rules).
      5) ${headings.perCodeConnectors} — one "### {CODE}" subsection per code that has a MULTI_ERROR_CONNECTOR_<CODE> block, each with its own connector table AND its own 3D layout image(s) right after the table.
      6) ${headings.commonComponents} — table: ${useJapanese ? '部品 | 役割 | 備考 | 参考' : 'Component | Role | Notes | Reference'}.
@@ -1367,35 +1441,13 @@ function buildFinalAnswerSystemPromptForRequest(
   // Connector rules depend on the Context, not on the classified pattern, so a
   // fault-code question never loses its connector table because of misclassification.
   if (hasConnectorContext(combinedContext)) {
-    prompt += buildConnectorSectionPrompt(multiError);
+    prompt += buildConnectorSectionPrompt(multiError, uniquePatterns);
   }
   return prompt;
 }
 
 async function classifyAnswerLanguage(userQuery: string, chatHistory: any[] = []): Promise<AnswerLanguage> {
-  const historyContext = chatHistory.slice(-4).map((m) => `${m.role}: ${m.content}`).join('\n');
-
-  try {
-    const response = await chatJson<AnswerLanguageResponse>([
-      {
-        role: 'system',
-        content:
-          'You are a strict language classifier. Determine the language that should be used to answer the user question. Return JSON only with language set to "ja" or "en" and a short reason. Choose the language of the user question itself, not the document language.',
-      },
-      {
-        role: 'user',
-        content: `User Query:\n${userQuery}\n\nRecent Chat History:\n${historyContext}\n\nOutput JSON only in this format:\n{\n  "language": "ja" or "en",\n  "reason": "short explanation"\n}`,
-      },
-    ]);
-
-    if (response?.language === 'ja' || response?.language === 'en') {
-      return response.language;
-    }
-  } catch (error) {
-    console.error('Error classifying answer language:', error);
-  }
-
-  const trimmed = userQuery.trim();
+  const trimmed = `${userQuery}\n${chatHistory.slice(-2).map((m) => m.content || '').join('\n')}`.trim();
   return /[ぁ-んァ-ヶ一-龯]/.test(trimmed) ? 'ja' : 'en';
 }
 
@@ -1409,7 +1461,18 @@ const IMAGE_FILE_PATTERN = /[A-Za-z0-9_.\-()]+\.(?:jpg|jpeg|png|gif|webp)/;
  */
 function renderImageReferences(answerText: string, imageSasUrlMap?: Map<string, string>): string {
   const lookup = imageSasUrlMap ?? new Map<string, string>();
-  const urlFor = (fileName: string): string | undefined => lookup.get(fileName.trim().toLowerCase());
+  const urlFor = (fileName: string): string | undefined => {
+    const key = fileName.trim().toLowerCase();
+    if (!key) return undefined;
+    const direct = lookup.get(key);
+    if (direct) return direct;
+    const base = key.split('/').pop() || key;
+    if (lookup.get(base)) return lookup.get(base);
+    for (const [mapKey, url] of lookup) {
+      if (mapKey === base || mapKey.endsWith(`/${base}`) || base.endsWith(mapKey)) return url;
+    }
+    return undefined;
+  };
   const toMarkdown = (fileName: string, fallback: string): string => {
     const url = urlFor(fileName);
     return url ? `![${fileName}](${url})` : fallback;
@@ -1418,8 +1481,8 @@ function renderImageReferences(answerText: string, imageSasUrlMap?: Map<string, 
   let rendered = answerText;
 
   // 1. Canonical token, plus broken leftovers like [IMG:file.jpg]] after a PDF-link rewrite.
-  rendered = rendered.replace(/\[\[\s*IMG\s*:\s*([^\]]+?)\s*\]\]/gi, (_m, name) => toMarkdown(String(name), ''));
-  rendered = rendered.replace(/\[\s*IMG\s*:\s*([^\]]+?)\s*\]\]?/gi, (_m, name) => toMarkdown(String(name), ''));
+  rendered = rendered.replace(/\[\[\s*IMG\s*:\s*([^\]]+?)\s*\]\]/gi, (_m, name) => toMarkdown(String(name), _m));
+  rendered = rendered.replace(/\[\s*IMG\s*:\s*([^\]]+?)\s*\]\]?/gi, (_m, name) => toMarkdown(String(name), _m));
 
   // 2. Markdown images the model produced anyway - re-point them at the real URL.
   rendered = rendered.replace(/!\[([^\]]*)\]\(([^)]*)\)/g, (match, alt, url) => {
@@ -1451,27 +1514,85 @@ function renderImageReferences(answerText: string, imageSasUrlMap?: Map<string, 
 
 export const __testRenderImageReferences = renderImageReferences;
 
+function expandPdfTokens(text: string, pdfTokenMap?: Map<string, string>): string {
+  if (!pdfTokenMap || pdfTokenMap.size === 0) return text;
+  const lookup = (refId: string) =>
+    pdfTokenMap.get(refId.toLowerCase()) || pdfTokenMap.get(refId) || '';
+  return text
+    .replace(/\[\[\s*PDF\s*:\s*(shop-\d+)\s*\]\]/gi, (match, refId) => lookup(String(refId)) || match)
+    .replace(/\[(shop-\d+)\]/gi, (match, refId) => lookup(String(refId)) || match)
+    .replace(/\[----\]/g, '[📄 Document Reference]');
+}
+
 /**
- * Streaming helper: buffers just enough text so an image token is never split
- * across two chunks, and renders tokens as soon as they are complete.
+ * Hold only incomplete asset tokens. Do NOT hold on a bare "[" — that caused
+ * intermittent freezes whenever the model emitted "[" in normal prose.
  */
-function createStreamingImageRenderer(imageSasUrlMap?: Map<string, string>) {
+function incompleteAssetTokenStart(text: string): number {
+  for (let i = text.length - 1; i >= 0; i--) {
+    if (text[i] !== '[') continue;
+    const rest = text.slice(i);
+
+    if (rest.startsWith('[[')) {
+      if (rest.includes(']]')) continue;
+      // Incomplete [[PDF:...]] / [[IMG:...]] (or short prefix of those tags)
+      if (/^\[\[\s*(IMG|PDF)\s*:/i.test(rest)) return i;
+      if (/^\[\[\s*(?:I(?:M(?:G)?)?|P(?:D(?:F)?)?)?:?\s*$/i.test(rest)) return i;
+      // Very short unknown [[... — wait a bit, then give up at flush
+      if (rest.length <= 10) return i;
+      continue;
+    }
+
+    // Incomplete [shop-123] only (require at least "[s" so bare "[" is emitted)
+    if (/^\[s(?:h(?:o(?:p(?:-\d*)?)?)?)?$/i.test(rest)) return i;
+  }
+  return -1;
+}
+
+/**
+ * Streaming helper: buffers just enough text so an image/PDF token is never split
+ * across two chunks, and expands tokens as soon as they are complete.
+ */
+function createStreamingAssetRenderer(
+  imageSasUrlMap?: Map<string, string>,
+  pdfTokenMap?: Map<string, string>,
+  onHoldChange?: (holding: boolean) => void
+) {
   let buffer = '';
+  let wasHolding = false;
+
+  const expand = (text: string): string =>
+    renderImageReferences(expandPdfTokens(text, pdfTokenMap), imageSasUrlMap);
+
+  const setHolding = (holding: boolean) => {
+    if (holding === wasHolding) return;
+    wasHolding = holding;
+    onHoldChange?.(holding);
+  };
 
   return {
-    // Emits only whole lines so a file name or [[IMG:...]] token is never split.
     feed(chunk: string): string {
       buffer += chunk;
-      const lastNewline = buffer.lastIndexOf('\n');
-      if (lastNewline < 0) return '';
-      const ready = buffer.slice(0, lastNewline + 1);
-      buffer = buffer.slice(lastNewline + 1);
-      return renderImageReferences(ready, imageSasUrlMap);
+      const holdFrom = incompleteAssetTokenStart(buffer);
+      if (holdFrom < 0) {
+        const ready = buffer;
+        buffer = '';
+        setHolding(false);
+        return expand(ready);
+      }
+      const ready = buffer.slice(0, holdFrom);
+      buffer = buffer.slice(holdFrom);
+      setHolding(buffer.length > 0);
+      return ready ? expand(ready) : '';
     },
     flush(): string {
       const rest = buffer;
       buffer = '';
-      return rest ? renderImageReferences(rest, imageSasUrlMap) : '';
+      setHolding(false);
+      return rest ? expand(rest) : '';
+    },
+    isHolding(): boolean {
+      return wasHolding;
     },
   };
 }
@@ -1485,15 +1606,41 @@ export async function streamFinalAnswer(
   manualMode: boolean = false,
   onChunk: (chunk: string) => void,
   imageUrls?: string[],
-  imageSasUrlMap?: Map<string, string>
+  imageSasUrlMap?: Map<string, string>,
+  pdfTokenMap?: Map<string, string>,
+  reasoningEffort: typeof CHAT_REASONING_EFFORT | typeof FINAL_ANSWER_REASONING_EFFORT = FINAL_ANSWER_REASONING_EFFORT,
+  streamHooks?: {
+    onModelFirstToken?: (msFromAnswerStart: number) => void;
+    onHoldChange?: (holding: boolean) => void;
+  }
 ): Promise<string> {
   try {
     let fullAnswer = '';
+    let modelFirstTokenReported = false;
+    let answerCallStartedAt = 0;
+    const noteModelFirstToken = () => {
+      if (modelFirstTokenReported) return;
+      modelFirstTokenReported = true;
+      const started = answerCallStartedAt || Date.now();
+      streamHooks?.onModelFirstToken?.(Math.max(0, Date.now() - started));
+    };
     const historyMessages = chatHistory.slice(-4).map(m => ({
       role: m.role,
       content: m.content,
     }));
     const assetLookup = extractFinalAnswerAssetLookup(combinedContext);
+    if (pdfTokenMap) {
+      for (const [refId, markdown] of pdfTokenMap) {
+        assetLookup.pdfByRefId.set(refId.toLowerCase(), markdown);
+        const parsed = markdown.match(/^\[([^\]]+)\]\(<([^>]+)>\)$/) || markdown.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+        if (parsed) {
+          const title = parsed[1].trim();
+          const url = parsed[2].trim();
+          addPdfAliases(assetLookup.pdfByTitle, title, url);
+          assetLookup.pdfLinkTitles.push({ label: title, url });
+        }
+      }
+    }
     if (Array.isArray(imageUrls) && imageUrls.length > 0) {
       for (const url of imageUrls) {
         try {
@@ -1517,6 +1664,7 @@ export async function streamFinalAnswer(
       const endpoint = requireNonEmpty(getChatEndpoint(), 'AZURE_AI_INFERENCE_ENDPOINT');
       const model = requireNonEmpty(getChatModel(), 'AZURE_OPENAI_DEPLOYMENT');
       const client = getInferenceClient(endpoint);
+      answerCallStartedAt = Date.now();
       const response = await client
         .path('/chat/completions')
         .post({
@@ -1528,7 +1676,8 @@ export async function streamFinalAnswer(
               { role: 'user', content: userQuery },
             ],
             stream: true,
-          },
+            reasoning_effort: reasoningEffort,
+          } as any,
         })
         .asNodeStream();
 
@@ -1546,9 +1695,13 @@ export async function streamFinalAnswer(
         throw new Error(`Chat completion request failed with status ${response.status}: ${errorBody}`);
       }
 
-      const imageRenderer = createStreamingImageRenderer(imageSasUrlMap);
+      const assetRenderer = createStreamingAssetRenderer(
+        imageSasUrlMap,
+        pdfTokenMap,
+        streamHooks?.onHoldChange
+      );
       const emitChunk = (text: string) => {
-        const ready = imageRenderer.feed(text);
+        const ready = assetRenderer.feed(text);
         if (ready) onChunk(ready);
       };
 
@@ -1561,12 +1714,13 @@ export async function streamFinalAnswer(
         for (const choice of payload.choices ?? []) {
           const content = choice.delta?.content ?? '';
           if (content) {
+            noteModelFirstToken();
             fullAnswer += content;
             emitChunk(content);
           }
         }
       }
-      const tail = imageRenderer.flush();
+      const tail = assetRenderer.flush();
       if (tail) onChunk(tail);
 
       const rewrittenAnswer = renderImageReferences(
@@ -1578,17 +1732,24 @@ export async function streamFinalAnswer(
     }
 
     if (config.azureOpenAI.endpoint && isAzureResponsesUrl(config.azureOpenAI.endpoint)) {
-      const imageRenderer = createStreamingImageRenderer(imageSasUrlMap);
+      const assetRenderer = createStreamingAssetRenderer(
+        imageSasUrlMap,
+        pdfTokenMap,
+        streamHooks?.onHoldChange
+      );
+      answerCallStartedAt = Date.now();
       const fullAnswerFromResponses = await streamResponses(
         userQuery,
         systemPrompt,
         historyMessages as any,
         (text: string) => {
-          const ready = imageRenderer.feed(text);
+          noteModelFirstToken();
+          const ready = assetRenderer.feed(text);
           if (ready) onChunk(ready);
-        }
+        },
+        reasoningEffort
       );
-      const tail = imageRenderer.flush();
+      const tail = assetRenderer.flush();
       if (tail) onChunk(tail);
 
       const rewrittenAnswer = renderImageReferences(

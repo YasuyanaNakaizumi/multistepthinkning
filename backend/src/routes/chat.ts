@@ -4,7 +4,6 @@ import { appendChatLogEntry } from '../services/chatLogBlob';
 import { MultiStepReasoningRequest } from '../types';
 
 const router = Router();
-const reasoningService = new MultiStepReasoningService();
 
 // POST /api/chat - Process chat request with multi-step reasoning
 function extractDocumentNumbers(request: MultiStepReasoningRequest): string[] {
@@ -23,7 +22,7 @@ router.post('/api/chat', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Missing required fields: query, selectedPdfs or selectedDocuments' });
     }
 
-    // Process the request with the derived document numbers
+    const reasoningService = new MultiStepReasoningService();
     const response = await reasoningService.processRequest({
       ...request,
       selectedPdfs,
@@ -40,7 +39,7 @@ router.post('/api/chat', async (req: Request, res: Response) => {
 // POST /api/chat/stream - Stream the final answer
 router.post('/api/chat/stream', async (req: Request, res: Response) => {
   try {
-    const { query, selectedPdfs: rawPdfs, selectedDocuments, chatHistory, userEmail: rawUserEmail } = req.body;
+    const { query, selectedPdfs: rawPdfs, selectedDocuments, chatHistory, userEmail: rawUserEmail, mode: rawMode } = req.body;
     const chatSessionId = typeof req.body?.chatSessionId === 'string' && req.body.chatSessionId.trim()
       ? req.body.chatSessionId.trim()
       : crypto.randomUUID();
@@ -48,9 +47,10 @@ router.post('/api/chat/stream', async (req: Request, res: Response) => {
       (selectedDocuments?.length
         ? selectedDocuments.map((d: any) => d.documentNumber)
         : rawPdfs) || [];
+    const mode = rawMode === 'fast' ? 'fast' : 'thinking';
 
     console.log(
-      `[Chat] stream received: docs=${selectedPdfs.length} query="${String(query || '').slice(0, 80)}"`
+      `[Chat] stream received: mode=${mode} docs=${selectedPdfs.length} query="${String(query || '').slice(0, 80)}"`
     );
 
     if (!query || selectedPdfs.length === 0) {
@@ -58,17 +58,22 @@ router.post('/api/chat/stream', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Missing required fields: query, selectedPdfs or selectedDocuments' });
     }
 
-    // Set headers for SSE streaming
+    // Set headers for SSE streaming (disable proxy/nginx buffering)
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+    req.socket?.setNoDelay?.(true);
 
     const writeEvent = (event: string, data: unknown) => {
       res.write(`event: ${event}\n`);
       res.write(`data: ${JSON.stringify(data)}\n\n`);
+      const flushFn = (res as { flush?: () => void }).flush;
+      if (typeof flushFn === 'function') flushFn.call(res);
     };
 
-    // Stream thinking step updates while processing
+    const reasoningService = new MultiStepReasoningService();
     reasoningService.setProgressCallback((steps) => {
       writeEvent('steps', { steps });
     });
@@ -80,6 +85,7 @@ router.post('/api/chat/stream', async (req: Request, res: Response) => {
       chatSessionId,
       chatHistory: chatHistory || [],
       userEmail: rawUserEmail,
+      mode,
     };
 
     const initial = await reasoningService.processRequest(request);
@@ -88,52 +94,33 @@ router.post('/api/chat/stream', async (req: Request, res: Response) => {
       imageUrls: initial.imageUrls,
       pdfUrls: initial.pdfUrls,
       followupQuestions: initial.followupQuestions,
+      answerReasoningEffort: reasoningService.getAnswerReasoningEffort(),
     });
 
-    // Get the ref link map for SAS replacement (fallback for any residual [shop-N])
-    const refLinkMap = reasoningService.getRefLinkMap();
-
-    // Buffer so we can replace [shop-N] tokens that are split across chunks
-    let pending = '';
-    const flush = (text: string, isFinal: boolean) => {
-      pending += text;
-
-      // Replace any complete [shop-N] tokens using the map
-      for (const [refId, link] of refLinkMap.entries()) {
-        pending = pending.replace(new RegExp(`\\[${refId}\\]`, 'g'), link);
-      }
-
-      // Handle [----] placeholder
-      pending = pending.replace(/\[----\]/g, '[📄 Document Reference]');
-
-      let emit = pending;
-      if (!isFinal) {
-        // Keep a tail in buffer if it could be the start of a [shop-N] token
-        const holdMatch = pending.match(/\[(?:s(?:h(?:o(?:p(?:-[0-9]*)?)?)?)?)?$/);
-        if (holdMatch) {
-          const holdIdx = pending.length - holdMatch[0].length;
-          emit = pending.slice(0, holdIdx);
-          pending = pending.slice(holdIdx);
-        } else {
-          pending = '';
-        }
-      } else {
-        pending = '';
-      }
-
-      if (emit) writeEvent('chunk', { text: emit });
-    };
-
+    // Asset token expansion/hold lives only in openai.ts (single buffer).
+    // This route forwards displayable text immediately for low UI TTFT.
     const finalAnswer = await reasoningService.streamAnswer(
       query,
       { main: [], connector: [], sub: [] },
       chatHistory || [],
-      (chunk: string) => flush(chunk, false)
+      (chunk: string) => {
+        if (chunk) writeEvent('chunk', { text: chunk });
+      },
+      {
+        onModelFirstToken: (msFromAnswerStart) => {
+          writeEvent('timing', {
+            modelFirstTokenMs: msFromAnswerStart,
+          });
+        },
+        onHoldChange: (holding) => {
+          writeEvent('stream_status', { holding });
+        },
+      }
     );
     if (typeof finalAnswer === 'string' && finalAnswer.length > 0) {
+      // Final rewrite may expand residual assets; client applies only if content differs.
       writeEvent('final', { text: finalAnswer });
     }
-    flush('', true);
 
     const userEmail = typeof request.userEmail === 'string' ? request.userEmail.trim() : '';
     if (userEmail) {
@@ -141,11 +128,6 @@ router.post('/api/chat/stream', async (req: Request, res: Response) => {
         userEmail,
         sessionId: chatSessionId,
         query,
-        answer: finalAnswer,
-        thinkingSteps: initial.thinkingSteps,
-        followupQuestions: initial.followupQuestions,
-        imageUrls: initial.imageUrls,
-        pdfUrls: initial.pdfUrls,
         selectedDocuments: selectedDocuments || [],
         chatHistoryLength: (chatHistory || []).length,
         eventType: (chatHistory || []).length === 0 ? 'new_chat' : 'message',

@@ -68,6 +68,13 @@ export interface SearchQueriesResponse {
   has_codes: boolean;
 }
 
+/** Combined Step 1+2: search queries and initial TOC path selection. */
+export interface InitialQueryAndTocResponse {
+  queries: string[];
+  has_codes: boolean;
+  chapters: string[];
+}
+
 export interface TOCChaptersResponse {
   chapters: string[];
 }
@@ -92,6 +99,10 @@ export interface ExtractedElements {
   components: string[];
   reasoning: string;
   needs_followup: boolean;
+  /** Combined with former detectMultiErrorCodes step. */
+  is_multi_error_codes?: boolean;
+  multi_error_codes?: string[];
+  multi_error_reason?: string;
 }
 
 export interface ChapterClassification {
@@ -113,6 +124,8 @@ export interface ThinkingStep {
   status: 'pending' | 'in_progress' | 'completed' | 'error';
   timestamp?: string;
   error?: string;
+  /** Present when this step calls GPT (e.g. none / low / medium / high). */
+  reasoningEffort?: string;
 }
 
 export interface ChatMessage {
@@ -133,6 +146,12 @@ export interface MultiStepReasoningRequest {
   chatSessionId?: string;
   /** Logged-in user's email for chat log storage. */
   userEmail?: string;
+  /**
+   * Chat speed mode.
+   * - thinking: full multi-step pipeline (default)
+   * - fast: TOC select → retrieve chapter text → answer
+   */
+  mode?: 'thinking' | 'fast';
   chatHistory: ChatMessage[];
 }
 

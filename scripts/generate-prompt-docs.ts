@@ -9,12 +9,13 @@ const outPath = path.join(outDir, 'prompts.html');
 const watchMode = process.argv.includes('--watch');
 
 const titleMap: Record<string, string> = {
-  generateSearchQueries: 'Step 1: Generate Search Queries',
-  selectTOCChaptersInitial: 'Step 2 (Initial): Select TOC Chapters',
+  generateSearchQueriesAndInitialToc: 'Step 1+2: Generate Search Queries and Initial TOC Paths',
+  generateSearchQueries: 'Step 1 (compat): Generate Search Queries',
+  selectTOCChaptersInitial: 'Step 2 (compat): Select TOC Chapters Initial',
   selectTOCChapters: 'Step 2 (Additional): Select TOC Chapters',
   judgeAnswerability: 'Step 3: Judge Answerability',
-  extractElements: 'Step 4: Extract Elements',
-  detectMultiErrorCodes: 'Step 5: Detect Multiple Error Codes',
+  extractElements: 'Step 4+5: Extract Elements and Multi-error Detection',
+  detectMultiErrorCodes: 'Step 5 (compat): Detect Multiple Error Codes',
   classifyAnswerPatterns: 'Step 8: Answer Pattern Classification',
   classifyChapters: 'Step 7: Classify Chapters',
   buildFinalAnswerSystemPromptBase: 'Step 8: Final Answer System Prompt (Base)',
@@ -30,6 +31,7 @@ const titleMap: Record<string, string> = {
 };
 
 const promptOrder = [
+  'generateSearchQueriesAndInitialToc',
   'generateSearchQueries',
   'selectTOCChaptersInitial',
   'selectTOCChapters',

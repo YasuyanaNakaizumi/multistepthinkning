@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <title>Thinking Flow — Improved AI Bot Prototype</title>
+  <title>Thinking / Fast Flow — Improved AI Bot Prototype</title>
   <style>
     :root {
       --ink: #111827;
@@ -35,11 +35,15 @@
     }
     .toolbar h1 { font-size: 15px; margin: 0; font-weight: 700; letter-spacing: -0.02em; flex: 1; min-width: 0; }
     .toolbar .hint { margin: 0; font-size: 12px; color: var(--muted); width: 100%; line-height: 1.45; }
+    .mode-group { display: inline-flex; gap: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+    .mode-group .toolbtn { border: 0; border-radius: 0; height: 34px; }
+    .mode-group .toolbtn + .toolbtn { border-left: 1px solid var(--line); }
     .toolbtn {
       border: 1px solid var(--line); background: #fff; border-radius: 8px; height: 34px;
       padding: 0 11px; cursor: pointer; font-size: 13px; color: var(--ink);
     }
     .toolbtn.active { background: #111827; color: #fff; border-color: #111827; }
+    .mode-group .toolbtn.active { border-color: transparent; }
     .legend { display: flex; gap: 8px; flex-wrap: wrap; }
     .dot { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
     .dot i { width: 8px; height: 8px; border-radius: 99px; display: inline-block; }
@@ -48,9 +52,12 @@
       background-image: radial-gradient(#d6d3cd 1px, transparent 1px);
       background-size: 22px 22px;
       touch-action: none;
+      -webkit-user-select: none;
+      user-select: none;
     }
     .viewport.drag { cursor: grabbing; }
-    .board { position: absolute; transform-origin: 0 0; }
+    .viewport.drag, .viewport.drag * { -webkit-user-select: none !important; user-select: none !important; }
+    .board { position: absolute; transform-origin: 0 0; -webkit-user-select: none; user-select: none; }
     .wires { position: absolute; inset: 0; pointer-events: none; overflow: visible; }
     .frame {
       position: absolute; border: 1.5px dashed #d1d5db; border-radius: 18px;
@@ -59,6 +66,7 @@
     .frame .ft {
       position: absolute; top: -11px; left: 16px; background: var(--paper);
       padding: 0 8px; font-size: 11px; font-weight: 700; color: #6b7280; letter-spacing: .04em;
+      pointer-events: none; -webkit-user-select: none; user-select: none;
     }
     .node {
       position: absolute; background: #fff; border: 1.5px solid #d1d5db; border-radius: 14px;
@@ -118,6 +126,16 @@
     .note { font-size: 12px; color: var(--muted); line-height: 1.55; margin: 0 0 14px; }
     .addon { border: 1px solid #fde68a; background: #fffbeb; border-radius: 10px; padding: 10px; margin: 0 0 12px; }
     .addon h4 { margin: 0 0 6px; font-size: 12px; }
+    .sample {
+      border: 1px solid #bfdbfe; background: #eff6ff; border-radius: 10px; padding: 10px; margin: 0 0 16px;
+    }
+    .sample h4 { margin: 0 0 6px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--gpt); display: flex; justify-content: space-between; align-items: center; }
+    .sample pre {
+      margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+      font-size: 11.5px; line-height: 1.5; background: #fff; border: 1px solid #dbeafe;
+      border-radius: 8px; padding: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .sidebar .body, .sidebar .body * { -webkit-user-select: text; user-select: text; }
     .list {
       display: none; flex: 1; overflow: auto; padding: 16px 16px 40px;
       padding-bottom: max(40px, env(safe-area-inset-bottom));
@@ -164,21 +182,23 @@
   <div class="shell">
     <div class="left">
       <div class="toolbar">
-        <h1>Thinking flow after a user question</h1>
-        <button class="toolbtn" id="view-board">Board</button>
-        <button class="toolbtn" id="view-list">List</button>
+        <h1 id="page-title">Thinking flow after user question</h1>
+        <div class="mode-group" role="group" aria-label="Mode">
+          <button class="toolbtn active" id="mode-thinking" type="button">Thinking</button>
+          <button class="toolbtn" id="mode-fast" type="button">Fast</button>
+        </div>
         <button class="toolbtn" id="zoom-out">−</button>
         <button class="toolbtn" id="zoom-in">＋</button>
-        <button class="toolbtn" id="fit">Fit all</button>
+        <button class="toolbtn" id="fit">Fit</button>
         <div class="legend">
           <span class="dot"><i style="background:#2563eb"></i>GPT</span>
           <span class="dot"><i style="background:#059669"></i>Search</span>
           <span class="dot"><i style="background:#d97706"></i>Branch</span>
-          <span class="dot"><i style="background:#4b5563"></i>Process</span>
+          <span class="dot"><i style="background:#4b5563"></i>Logic</span>
           <span class="dot"><i style="background:#7c3aed"></i>System</span>
           <span class="dot"><i style="background:#db2777"></i>User</span>
         </div>
-        <p class="hint">Drag or pinch to pan and zoom. Click a GPT block to see that step’s System Prompt and User Prompt. {{variables}} are filled in at runtime.</p>
+        <p class="hint" id="page-hint">Drag / pinch to pan and zoom. Click a GPT node for System / User prompts and expected output examples. Display section: prep → GPT output → paint.</p>
       </div>
       <div class="viewport" id="viewport"></div>
       <div class="list" id="list"></div>
@@ -186,14 +206,14 @@
     <aside class="sidebar" id="sidebar">
       <header>
         <div>
-          <h2 id="st">Prompts</h2>
-          <p id="ss">Click a node to inspect it</p>
+          <h2 id="st">Prompt</h2>
+          <p id="ss">Click a node</p>
         </div>
         <button class="win" id="win" hidden>Open window</button>
         <button class="x" id="close">×</button>
       </header>
       <div class="body" id="sb">
-        <div class="empty">Select a GPT node to see the System Prompt and User Prompt templates sent at that step.</div>
+        <div class="empty">Select a GPT node to see expected output examples plus System / User prompts. Use Thinking / Fast to switch the diagram.</div>
       </div>
     </aside>
   </div>
@@ -201,12 +221,17 @@
 
   <script>
     const P = {
-      queries: {
-        title: "1. Generate search queries",
-        fn: "generateSearchQueries",
-        system: `Your goal is to generate effective search queries for a technical documentation search system.
+      plan: {
+        title: "Search queries + initial TOC",
+        fn: "generateSearchQueriesAndInitialToc · reasoning: none",
+        system: `You prepare the first retrieval plan for a technical documentation search system.
 
-## What to Extract
+## Task
+In ONE response:
+1) Generate effective search queries from the user question (and recent chat history).
+2) If a Table of Contents is provided, select the most relevant TOC path values for the INITIAL search.
+
+## What to Extract into queries
 - error codes / fault codes (e.g., CA441)
 - part numbers, TSI, PSN, serial-like identifiers
 - component names, connector IDs (when explicitly mentioned)
@@ -216,66 +241,74 @@
 - If chat history is provided, you MUST use it to resolve omitted context in the current user query.
 - Do NOT invent identifiers that do not appear in the user query or recent chat history.
 
-## Output
-- Output JSON format only: {"queries": ["query1", "query2"], "has_codes": true/false}
-- If no identifiers are found, return the original user query as a single query.`,
-        user: `User Query: {{userQuery}}
+## Query rules
+- If no identifiers are found, return the original user query as a single query.
+- Set has_codes true only when at least one error/fault code appears in the query or recent history.
 
-Recent Chat History (most recent last):
-{{chatHistory.slice(-6) as "role: content"}}`
-      },
-      tocInitial: {
-        title: "2. Initial TOC path selection",
-        fn: "selectTOCChaptersInitial",
-        system: "Select the most relevant TOC path values for the user question. Prefer the deepest, most specific entries you can find.",
-        user: `Select a SMALL set of relevant TOC path values for the user question.
-
-## Rules
-1. Return the EXACT path strings as they appear in the TOC (one path per line).
+## TOC path rules (only when TOC is provided)
+1. Return the EXACT path strings as they appear in the TOC.
 2. Prefer leaf-level / deepest / most specific paths over parent paths.
 3. Be as specific as possible and include low-level paths whenever they are relevant.
 4. Do NOT return titles. Return path values only.
 5. Be helpful but not exhaustive. This is the INITIAL path selection.
 6. Maintenance (OMM / 取扱説明書): If the query is about maintenance, メンテナンス, periodic maintenance, or 定期点検, and a Maintenance/Periodic Maintenance parent exists, also include its child maintenance item/detail paths, not just the schedule/interval parent.
-6. Return JSON only.
+7. If no TOC is provided, return "chapters": [].
 
-## Output Format
-{ "chapters": ["XXXXXXXX", "XXXXXXXXX"] }
+## Output
+Return JSON only:
+{
+  "queries": ["query1", "query2"],
+  "has_codes": true,
+  "chapters": ["path/from/toc", "another/path"]
+}`,
+        user: `User Query: {{userQuery}}
 
-## Search Queries
-{{JSON.stringify(queries)}}
-
-## User Query
-{{userQuery}}
+Recent Chat History (most recent last):
+{{chatHistory.slice(-6) as "role: content"}}
 
 ## Table of Contents
-{{tocContent}}`
+{{tocContent || "(No TOC provided — return chapters as an empty array.)"}}`,
+        sample: `{
+  "queries": ["CA441", "CA441 fault diagnosis"],
+  "has_codes": true,
+  "chapters": [
+    "TROUBLESHOOTING/FAILURE CODE/CA441",
+    "CHECK ELECTRIC EQUIPMENT/CONNECTOR LIST AND LAYOUT"
+  ]
+}`
       },
       judge: {
-        title: "4. Answerability judgment",
-        fn: "judgeAnswerability",
+        title: "Answerability judgment",
+        fn: "judgeAnswerability · reasoning: none",
         system: 'You are a document relevance judge. Determine if the provided document excerpts contain enough information to answer the user question. Output JSON format: {"answerable": true/false, "reason": "explanation"}',
         user: `User Query: {{userQuery}}
 
 Queries: {{JSON.stringify(queries)}}
 
 Document Excerpts:
-{{searchResults.slice(0,10) as "Chapter N (TOC): content"}}`
+{{searchResults.slice(0,10) as "Chapter N (TOC): content"}}`,
+        sample: `{
+  "answerable": true,
+  "reason": "Search results include CA441 diagnostic procedures and pass/fail criteria, so the question is answerable."
+}`
       },
       extract: {
-        title: "5. Element extraction",
-        fn: "extractElements",
-        system: `You are an expert in analyzing technical documents in Japanese and English. Based only on the user query and the provided Document Content, determine whether additional search is needed and extract the information required for that search.
+        title: "Element extraction + multi-error",
+        fn: "extractElements · reasoning: none (includes multi)",
+        system: `You are an expert in analyzing technical documents in Japanese and English. Based only on the user query and the provided Document Content, determine whether additional search is needed and extract the information required for that search. Also decide whether the user is asking about multiple error codes.
 
 ## Output Format
 {
-  "error_codes": [],
-  "connectors": [],
-  "reference_chapters": [],
-  "diagnostic_chapters": [],
-  "components": [],
-  "reasoning": "",
-  "needs_followup": false
+"error_codes": [],
+"connectors": [],
+"reference_chapters": [],
+"diagnostic_chapters": [],
+"components": [],
+"reasoning": "",
+"needs_followup": false,
+"is_multi_error_codes": false,
+"multi_error_codes": [],
+"multi_error_reason": ""
 }
 
 ## Extraction Rules
@@ -284,8 +317,8 @@ Document Excerpts:
 * If the provided content is TOC-like or chapter-list-like, prefer extracting chapter titles exactly as they appear instead of rewriting them.
 * When Retrieved Chapter Content contains "see" / "refer to" / "〜を参照", extract those destination titles into reference_chapters even if they also appear in the TOC or in already-retrieved body text.
 * error_codes: Extract explicit error or failure codes only when sufficient information about them has not already been found in the Document Content.
-* connectors: Extract explicit connector IDs ONLY when the user query is explicitly about connectors, wiring, error codes, diagnostics, or inspection. Take IDs only from chapter body text (Document Content), never from image captions, OCR, figure callouts, or 3D layout diagram labels. Do NOT copy an entire connector catalog.
-* reference_chapters: Extract chapter or section titles explicitly referenced by "see" / "refer to" / "〜を参照" (e.g. TEST ENGINE OIL PRESSURE, CHECKS BEFORE TROUBLESHOOTING, Electrical equipment / CHECK ELECTRIC EQUIPMENT).
+* connectors: Extract connector IDs when the query is about error codes, fault diagnosis, troubleshooting, inspection, wiring, or connectors. Primary source = chapter BODY text. FORBIDDEN: image captions, OCR, figure callouts, full connector catalog dump.
+* reference_chapters: Extract chapter/section titles referenced by "see" / "refer to" / "〜を参照". For fault diagnosis, also include connector list/layout and 3D layout titles when connectors appear.
 * diagnostic_chapters: Extract chapter titles related to troubleshooting, diagnosis, or inspection.
 * components: Extract up to two primary components involved.
 * reasoning: Briefly explain what information is available and what is missing.
@@ -294,49 +327,40 @@ Document Excerpts:
 * If the user query is not related to troubleshooting, diagnosis, inspection, or a check procedure, set needs_followup to false.
 * If it is related, set needs_followup to true when the Document Content is insufficient OR any of error_codes / connectors / reference_chapters / diagnostic_chapters is extracted.
 
+## Multiple error-code Rules
+* Decide if the query is about diagnosing TWO OR MORE distinct error codes.
+* Use only User Query, Chat History, Document Content / extracted error_codes. Do NOT invent codes.
+* Set is_multi_error_codes true only for two or more distinct codes diagnosed together.
+* multi_error_codes / multi_error_reason: list and short reason when multi; else [] / explanation.
+
 Return JSON only.`,
         user: `User Query: {{userQuery}}
 
 Chat History:
 {{chatHistory.slice(-4)}}
 
-Document Content:
+Document Content / TOC:
 ## Retrieved Chapter Content
-{{initial search chapter bodies: TOC + content}}
+{{initial search chapter bodies}}
 
 ## Table of Contents
-{{textContext TOC}}`
-      },
-      multi: {
-        title: "6. Multiple error-code detection",
-        fn: "detectMultiErrorCodes",
-        system: `You are an assistant that detects whether the user is asking about multiple error codes.
-
-Rules:
-1. Decide if the query is about diagnosing TWO OR MORE distinct error codes.
-2. Use only information present in the User Query, Recent Chat History, and Extracted Error Codes.
-3. Do NOT invent error codes.
-4. Normalize codes (trim spaces, keep original casing) and deduplicate.
-5. Return JSON only.
-
-Output JSON format:
-{
-  "is_multi_error_codes": true,
-  "error_codes": ["CA441", "CA442"],
-  "reason": "..."
-}`,
-        user: `User Query:
-{{userQuery}}
-
-Extracted Error Codes (from previous step):
-{{JSON.stringify(extractedErrorCodes)}}
-
-Recent Chat History (most recent last):
-{{chatHistory.slice(-6)}}`
+{{tocContent}}`,
+        sample: `{
+  "error_codes": ["CA441"],
+  "connectors": ["CN-A01"],
+  "reference_chapters": ["CONNECTOR LIST AND LAYOUT"],
+  "diagnostic_chapters": ["CA441"],
+  "components": ["sensor power circuit"],
+  "reasoning": "Diagnostic steps exist, but connector layout is missing — follow-up search needed.",
+  "needs_followup": true,
+  "is_multi_error_codes": false,
+  "multi_error_codes": [],
+  "multi_error_reason": "Only a single code CA441."
+}`
       },
       tocFollow: {
-        title: "7a. Follow-up TOC selection",
-        fn: "selectTOCChapters",
+        title: "Follow-up TOC selection",
+        fn: "selectTOCChapters · reasoning: none",
         system: "You are an expert at finding relevant TOC path values in technical manuals. Prefer the deepest, most specific paths. Return only additional TOC paths that have not already been searched.",
         user: `Below is the Table of Contents of available manuals. Given the search queries, select the TOC path values that are most likely to contain the needed information.
 
@@ -352,13 +376,13 @@ Do NOT select the same items again. Extract ONLY the additional TOC paths that s
 3. Prefer leaf-level / deepest / most specific paths.
 4. You MUST be exhaustive, not conservative.
 5. Do NOT return titles. Return path values only.
-6. Do not re-select a TOC path or title that already appears in Already Searched Chapters. If a previously searched parent is already covered, still include a child path only when that child itself was not searched and is needed.
+6. Do not re-select a TOC path or title that already appears in Already Searched Chapters.
 7. Fault codes: For each error code, include ALL TOC paths that contain that error code, except those already searched.
 8. Connectors: include connector list/layout AND the full 3D layout series (1)(2)(3).
 9. Inspections: include pre-diagnostic inspection and electrical inspection when present.
 10. Components: include location / explanation paths.
 11. Maintenance: include child item/procedure paths, not only the schedule parent.
-12. Explicit referenced titles: if a search query is a chapter title, include that exact path. Do not substitute a sibling (e.g. do not replace TEST ENGINE OIL PRESSURE with TEST ENGINE RELATED PARTS).
+12. Explicit referenced titles: if a search query is a chapter title, include that exact path.
 13. Return JSON only.
 
 ## Output Format
@@ -371,11 +395,18 @@ Do NOT select the same items again. Extract ONLY the additional TOC paths that s
 {{userQuery}}
 
 ## Table of Contents
-{{tocContent}}`
+{{tocContent}}`,
+        sample: `{
+  "chapters": [
+    "CHECK ELECTRIC EQUIPMENT/CONNECTOR LIST AND LAYOUT",
+    "CHECK ELECTRIC EQUIPMENT/3D LAYOUT (1)",
+    "CHECK ELECTRIC EQUIPMENT/3D LAYOUT (2)"
+  ]
+}`
       },
       classify: {
-        title: "8. Chapter classification",
-        fn: "classifyChapters",
+        title: "Chapter classification",
+        fn: "classifyChapters · reasoning: low",
         system: "You are an expert in classifying technical documents. Prefer IGNORE when a chapter is not clearly relevant, except explicitly referenced chapters and connector-related chapters.",
         user: `Classify each chapter based on how useful it is for answering the user's question.
 
@@ -404,11 +435,17 @@ Rules
 - Every chapter index must appear in exactly one category
 
 Output JSON only:
-{ "main": [0, 1], "connector": [4], "sub": [2], "ignore": [3] }`
+{ "main": [0, 1], "connector": [4], "sub": [2], "ignore": [3] }`,
+        sample: `{
+  "main": [0],
+  "connector": [2],
+  "sub": [1],
+  "ignore": [3, 4]
+}`
       },
       patterns: {
-        title: "9. Answer-pattern classification",
-        fn: "classifyAnswerPatterns",
+        title: "Answer pattern classification",
+        fn: "classifyAnswerPatterns · reasoning: none",
         system: "You are an expert at classifying how a user wants the final answer to be structured. Return one or more answer patterns from this allowed list: single_fault, assembly, multi_fault, maintenance, general. Choose all patterns that apply. Return JSON only.",
         user: `User Query: {{userQuery}}
 
@@ -429,42 +466,33 @@ Multi Error Context:
 - general: specification, usage, explanation, location lookup
 
 ## Output Format
-{ "patterns": ["single_fault", "assembly"], "reason": "short explanation" }`
-      },
-      language: {
-        title: "10. Answer-language classification",
-        fn: "classifyAnswerLanguage",
-        system: 'You are a strict language classifier. Determine the language that should be used to answer the user question. Return JSON only with language set to "ja" or "en" and a short reason. Choose the language of the user question itself, not the document language.',
-        user: `User Query:
-{{userQuery}}
-
-Recent Chat History:
-{{chatHistory.slice(-4)}}
-
-Output JSON only:
-{ "language": "ja" or "en", "reason": "short explanation" }`
+{ "patterns": ["single_fault", "assembly"], "reason": "short explanation" }`,
+        sample: `{
+  "patterns": ["single_fault"],
+  "reason": "The user is asking for diagnostic steps for a single fault code CA441."
+}`
       },
       final: {
-        title: "11. Final answer generation",
+        title: "Final answer generation",
         fn: "buildFinalAnswerSystemPromptForRequest + streamFinalAnswer",
         system: `You are an assistant supporting a mechanical engineer. Your task is to provide comprehensive and accurate answers by integrating the provided documents (text and images).
 
 Answer Creation Rules:
 0. Language (CRITICAL): Always write the entire answer in the same language as the user's question, regardless of the document language.
 1. Summary: Begin every answer with a 3-4 sentence summary.
-2. Completeness: Reproduce every procedure step, numeric value, pass/fail criterion, and explicit condition from MAIN refs. Do not reproduce SUB body text.
+2. Completeness: Reproduce every procedure step, numeric value, pass/fail criterion, and explicit condition from MAIN refs. From SUB refs, include supporting procedures, specs, criteria, and explanations when they help — keep amount proportional to need (not PDF-token-only; not an unnecessary full dump of every SUB chapter).
 3. Safety: Mark warnings (▼) and cautions (!).
 4. No Hallucination: Do not write facts that are not in the Context.
 5. No Chapter Mixing: Do not mix procedures from different chapters into one step.
 5b. Document Ref roles (follow CHAPTER_CLASSIFICATION_JSON):
    - MAIN: write the answer body from these refs.
-   - SUB: do not write SUB prose/tables/images; display only PDF_CITATION_MARKDOWN.
-   - CONNECTOR: you MAY write connector information in the answer body. CONNECTOR is not treated like SUB. Table Connector No. must come from MAIN context: (chapter body), never from image_explanation / Caption / OCR / diagram callouts.
+   - SUB: MAY and SHOULD write supporting content when needed (cross-refs, specs, key steps). Prefer a concise useful excerpt. Always attach that SUB ref's PDF citation token. Unused SUB refs may be listed briefly under Related documents / 関連資料.
+   - CONNECTOR: you MAY write connector information in the answer body. Table Connector No. must come from MAIN context: (chapter body), never from image_explanation / Caption / OCR / diagram callouts.
 6. Structure: Natural headings matching the question and Context.
 7. Readability: Prefer headings, bullets, and Markdown tables.
-8. Citations: Copy PDF_CITATION_MARKDOWN byte-for-byte. In ### {CODE}, cite that code's MAIN PDF only. A cross-reference step must use the referenced chapter's PDF, not the parent FAILURE CODE link.
-9. Cross-chapter References: Turn "〜を参照" / "see ..." / CHECKS BEFORE TROUBLESHOOTING / CHECK ELECTRIC EQUIPMENT into that chapter's PDF_CITATION_MARKDOWN.
-10. Images: insert [[IMG:<file name>]] on its own line. Backend replaces with SAS URLs. Never write raw image URLs.
+8. Citations: Use [[PDF:shop-N]] tokens byte-for-byte. In ### {CODE}, cite that code's MAIN PDF only. A cross-reference step must use the referenced chapter's PDF.
+9. Cross-chapter References: Expand needed SUB details in place (not link-only) and include matching SUB PDF token.
+10. Images: insert [[IMG:<file name>]] on its own line. Backend replaces with SAS URLs.
 11. Required Tools: "## Required Tools" table when tools appear.
 
 Context:
@@ -476,99 +504,189 @@ messages = [
   ...chatHistory.slice(-4),
   { role: "user", content: userQuery }
 ]
-stream: true`,
+stream: true
+Thinking: reasoning_effort = low
+Fast: reasoning_effort = none (No reasoning); patterns forced to ["general"]`,
+        sample: `CA441 is a fault code that indicates abnormal sensor power supply voltage. Below are the diagnostic preconditions, procedure, and decision criteria.[[PDF:shop-0]]
+
+## Preconditions
+- Turn the key ON
+- Prepare a multimeter
+
+## Diagnostic procedure
+1. Measure voltage at connector CN-A01
+[[IMG:ca441_connector.png]]
+2. Compare with the reference range (e.g. 4.75–5.25 V)
+
+## Related Connector Information
+| Connector No. | Connector Type | Number of pins | Installation position | Address |
+| --- | --- | --- | --- | --- |
+| CN-A01 | … | … | … | … |
+
+## Required Tools
+| Tool | Purpose |
+| --- | --- |
+| Multimeter | Voltage measurement |`,
         addons: [
           { title: "Language Reinforcement (always)", body: "ja: Keep all response text in Japanese.\nen: Keep all response text in English." },
-          { title: "ANSWER MODE - Single Fault (when patterns includes single_fault)", body: "Overview → Preconditions → Procedure → Decision/Diagnosis → Verification.\nReproduce the FULL sequence of steps, criteria, numeric values, and decision branches." },
-          { title: "ANSWER MODE - Assembly (when patterns includes assembly)", body: "Detailed step-by-step for removal / installation / assembly.\nPlace an image after each removal point, installation point, or critical sub-step." },
-          { title: "ANSWER MODE - Multiple Fault Codes (when patterns includes multi_fault or is_multi_error_codes)", body: "Common suspected components first, then each error code in its own ### {CODE} subsection.\nNever infer commonality across codes unless Context says it applies to ALL codes." },
-          { title: "ANSWER MODE - Periodic Maintenance (when patterns includes maintenance)", body: "Never answer with only a list of items. For each item give procedure, warnings, tools, and torque/clearance values." },
-          { title: "ANSWER MODE - Manual Integration (when both shop and OMM evidence exist)", body: "Synthesize one integrated answer instead of separate per-source sections." },
-          { title: "CONNECTOR SECTION (when Context has EXTRACTED_CONNECTORS or (CONNECTOR))", body: "Always output ## Related Connector Information just before Required Tools.\n5-column table: Connector No. | Connector Type | Number of pins | Installation position | Address\nConnector No. must appear in MAIN context: (diagnostic body text). Same rule for single-code and multi-code. Forbidden sources: image_explanation, Caption, OCR, diagram callouts. Do not dump the Connector List catalog; use it only to fill Type / pins / position / Address. If MAIN context has no IDs, write that none were found in the body text.\nImmediately after the table, insert 3D layout diagrams with [[IMG:...]] for the numbers already in the table." }
+          { title: "ANSWER MODE - Single Fault (patterns includes single_fault)", body: "Overview → Preconditions → Procedure → Decision/Diagnosis → Verification.\nReproduce the FULL sequence of steps, criteria, numeric values, and decision branches." },
+          { title: "ANSWER MODE - Assembly (patterns includes assembly)", body: "Detailed step-by-step for removal / installation / assembly.\nPlace an image after each removal point, installation point, or critical sub-step." },
+          { title: "ANSWER MODE - Multiple Fault Codes (patterns includes multi_fault or is_multi_error_codes)", body: "Common suspected components first, then each error code in its own ### {CODE} subsection.\nNever infer commonality across codes unless Context says it applies to ALL codes." },
+          { title: "ANSWER MODE - Periodic Maintenance (patterns includes maintenance)", body: "Place the maintenance item list right after the 3–4 sentence summary — not at the end.\nDo not stop at the list; continue with procedure, warnings, tools, and torque/clearance per item." },
+          { title: "ANSWER MODE - General (Fast always uses general)", body: "Answer directly and naturally. Do not force diagnostic or tool sections when the question is only about specifications, features, usage, or general explanations." },
+          { title: "ANSWER MODE - Manual Integration (shop + OMM both present)", body: "Synthesize one integrated answer instead of separate per-source sections." },
+          { title: "CONNECTOR SECTION (Context has EXTRACTED_CONNECTORS or (CONNECTOR))", body: "Mandatory \"## Related Connector Information\" just before Required Tools.\n5-column table: Connector No. | Connector Type | Number of pins | Installation position | Address\nConnector No. only from MAIN context: (chapter body). Never from image_explanation / Caption / OCR / diagram callouts." }
         ]
       }
     };
 
-    const FRAMES = [
-      { x: 390, y: 24, w: 400, h: 450, title: "1. Search preparation" },
-      { x: 36, y: 500, w: 1110, h: 700, title: "2. Initial search and judgment" },
-      { x: 390, y: 1230, w: 400, h: 490, title: "3. Element extraction" },
-      { x: 36, y: 1750, w: 340, h: 310, title: "Branch · Follow-up search" },
-      { x: 390, y: 2060, w: 400, h: 780, title: "4. Classification and final answer" }
-    ];
+    const EMPTY = {
+      user: "POST /api/chat/stream. body.mode is thinking (default) or fast. Includes selected manuals and chat history.",
+      userFast: "POST /api/chat/stream with mode: \"fast\". Same endpoint as Thinking; skips most prep (judge / extract / follow-up / classify).",
+      search: "Azure AI Search exact path filter. No GPT. Searches across selected documents (shop / OMM).",
+      searchFast: "Search by TOC paths. If empty, hybrid fallback on the first 3 queries (top=5 each). Results capped at 12.",
+      hybrid: "Only when answerable=false. Hybrid embedding + text search per query (top=5), merged into initial_results before extract.",
+      multi: "Reads is_multi_error_codes / multi_error_codes / multi_error_reason from extractElements. No extra GPT call (detectMultiErrorCodes is a compatibility fallback). UI may still show a \"Detecting Multiple Error Codes\" step with no GPT.",
+      lang: "classifyAnswerLanguage is regex only (no GPT). If userQuery + recent history contain hiragana/katakana/kanji → ja, else en.",
+      ctx: "Builds Context from MAIN/SUB/CONNECTOR classification. Attaches PDF SAS links, image map, CHAPTER_CLASSIFICATION_JSON.",
+      ctxFast: "Builds Context with all hits as MAIN. Skips classify / extract / follow-up. patterns fixed to ['general'].",
+      mainAll: "Fast only: all retrieved chapters become MAIN; connector/sub empty. No chapter-classification or extract GPT.",
+      d1: "On false only: run hybrid search (Embedding + Azure AI Search), merge into initial_results, then continue to extract.",
+      d2: "On true only: follow-up TOC selection → additional path search. On false, skip to chapter classification. Diagnostic heuristics may force needs_followup=true.",
+      searchF: "Azure AI Search on additional TOC paths. No GPT.",
+      uiPrep: "What the server finalizes just before the final-answer stream: Context (MAIN/SUB/CONNECTOR bodies, PDF SAS, image map), answer patterns, answer language (ja/en), reasoning effort (Thinking: low / Fast: none). This is the prep phase. GPT is not called yet — these are inputs for the final-answer GPT.",
+      uiGptOut: "What the final-answer GPT must output: Markdown body in the user's language, headings/procedures/tables as needed, citation tokens [[PDF:shop-N]], image tokens [[IMG:filename]] (one per line). Thinking uses reasoning: low; Fast uses none (No reasoning). Pattern-specific ANSWER MODE blocks are appended to System.",
+      uiHold: "During the stream, hold only incomplete [[PDF: / [[IMG: / [shop-… tokens in a single buffer so broken tokens never paint. UI shows \"Preparing links…\" while holding. Bare \"[\" is not held. No double-hold in chat.ts.",
+      uiPaint: "Paint completed text to chat. First visible character paints immediately (low UI TTFT). Later deltas coalesce ~32ms. Completed paragraphs render as Markdown; trailing incomplete lines stay plain.",
+      uiAssets: "Replace completed [[PDF:]] / [[IMG:]] with SAS-backed Markdown links so they are clickable. Final rewrite runs only when content differs."
+    };
 
-    const NODES = [
-      { id: "user", x: 465, y: 60, w: 250, h: 86, kind: "logic", kicker: "Input", title: "User question", sub: "POST /api/chat/stream" },
-      { id: "queries", x: 465, y: 200, w: 250, h: 92, kind: "gpt", kicker: "Step 1 · GPT", title: "Generate search queries", sub: "generateSearchQueries", prompt: "queries" },
-      { id: "toc", x: 465, y: 346, w: 250, h: 92, kind: "gpt", kicker: "Step 2 · GPT", title: "Initial TOC path selection", sub: "selectTOCChaptersInitial", prompt: "tocInitial" },
-      { id: "search", x: 465, y: 546, w: 250, h: 92, kind: "search", kicker: "Step 3 · Search", title: "Exact path search", sub: "Azure AI Search · no GPT" },
-      { id: "judge", x: 465, y: 690, w: 250, h: 92, kind: "gpt", kicker: "Step 4 · GPT", title: "Answerability judgment", sub: "judgeAnswerability", prompt: "judge" },
-      { id: "d1", x: 516, y: 830, w: 148, h: 148, kind: "branch", shape: "diamond", title: "answerable?" },
-      { id: "hybrid", x: 80, y: 1040, w: 250, h: 92, kind: "search", kicker: "Branch · Search", title: "Hybrid search", sub: "Only when false: embedding + re-search" },
-      { id: "extract", x: 465, y: 1266, w: 250, h: 92, kind: "gpt", kicker: "Step 5a · GPT", title: "Extract elements", sub: "extractElements", prompt: "extract" },
-      { id: "multi", x: 465, y: 1410, w: 250, h: 92, kind: "gpt", kicker: "Step 5a2 · GPT", title: "Detect multiple error codes", sub: "detectMultiErrorCodes", prompt: "multi" },
-      { id: "d2", x: 516, y: 1548, w: 148, h: 148, kind: "branch", shape: "diamond", title: "needs_followup?" },
-      { id: "tocF", x: 80, y: 1790, w: 250, h: 92, kind: "gpt", kicker: "Step 5b · GPT", title: "Follow-up TOC selection", sub: "selectTOCChapters · skip already searched", prompt: "tocFollow" },
-      { id: "searchF", x: 80, y: 1934, w: 250, h: 92, kind: "search", kicker: "Step 5b · Search", title: "Follow-up path search", sub: "Azure AI Search · no GPT" },
-      { id: "classify", x: 465, y: 2100, w: 250, h: 92, kind: "gpt", kicker: "Step 5c · GPT", title: "Classify MAIN/SUB/CONNECTOR", sub: "classifyChapters", prompt: "classify" },
-      { id: "patterns", x: 465, y: 2244, w: 250, h: 92, kind: "gpt", kicker: "Step 6b · GPT", title: "Classify answer patterns", sub: "classifyAnswerPatterns", prompt: "patterns" },
-      { id: "lang", x: 465, y: 2388, w: 250, h: 92, kind: "gpt", kicker: "Just before Final · GPT", title: "Classify answer language", sub: "classifyAnswerLanguage", prompt: "language" },
-      { id: "ctx", x: 465, y: 2532, w: 250, h: 86, kind: "logic", kicker: "Process", title: "Build context", sub: "PDF SAS / image map / classification" },
-      { id: "final", x: 465, y: 2670, w: 250, h: 92, kind: "gpt", kicker: "Final · GPT stream", title: "Generate final answer", sub: "streamFinalAnswer", prompt: "final" }
-    ];
+    const MODES = {
+      thinking: {
+        title: "Thinking flow after user question",
+        hint: "Drag / pinch to pan and zoom. Click a GPT node for System / User prompts and expected output examples. Display section: prep → GPT output → paint.",
+        boardW: 1180,
+        boardH: 3340,
+        frames: [
+          { x: 390, y: 24, w: 400, h: 300, title: "1. Search prep (1 GPT)" },
+          { x: 36, y: 350, w: 1110, h: 700, title: "2. Initial search & judgment" },
+          { x: 390, y: 1080, w: 400, h: 490, title: "3. Extract (multi merged)" },
+          { x: 36, y: 1600, w: 340, h: 310, title: "Branch · follow-up search" },
+          { x: 390, y: 1910, w: 400, h: 780, title: "4. Classify & final answer" },
+          { x: 36, y: 2760, w: 1110, h: 520, title: "5. Answer prep & display" }
+        ],
+        nodes: [
+          { id: "user", x: 465, y: 60, w: 250, h: 86, kind: "logic", kicker: "Input", title: "User question", sub: "mode: thinking · POST /api/chat/stream", empty: "user" },
+          { id: "plan", x: 465, y: 190, w: 250, h: 100, kind: "gpt", kicker: "Step 1+2 · GPT", title: "Search queries + initial TOC", sub: "Expected: queries / chapters JSON · reasoning: none", prompt: "plan" },
+          { id: "search", x: 465, y: 396, w: 250, h: 92, kind: "search", kicker: "Step 3 · Search", title: "Exact path search", sub: "Azure AI Search · no GPT", empty: "search" },
+          { id: "judge", x: 465, y: 540, w: 250, h: 92, kind: "gpt", kicker: "Step 4 · GPT", title: "Answerability judgment", sub: "Expected: { answerable, reason } · none", prompt: "judge" },
+          { id: "d1", x: 516, y: 680, w: 148, h: 148, kind: "branch", shape: "diamond", title: "answerable?", empty: "d1" },
+          { id: "hybrid", x: 80, y: 890, w: 250, h: 92, kind: "search", kicker: "Branch · Search", title: "Hybrid search", sub: "Only when false · Embedding + re-search", empty: "hybrid" },
+          { id: "extract", x: 465, y: 1120, w: 250, h: 100, kind: "gpt", kicker: "Step 5a · GPT", title: "Extract + multi-error", sub: "Expected: error_codes / needs_followup JSON", prompt: "extract" },
+          { id: "multi", x: 465, y: 1270, w: 250, h: 92, kind: "logic", kicker: "Derived · no GPT", title: "Apply multi-error fields", sub: "Read multi_* from extract", empty: "multi" },
+          { id: "d2", x: 516, y: 1410, w: 148, h: 148, kind: "branch", shape: "diamond", title: "needs_followup?", empty: "d2" },
+          { id: "tocF", x: 80, y: 1640, w: 250, h: 92, kind: "gpt", kicker: "Step 5b · GPT", title: "Follow-up TOC selection", sub: "Expected: { chapters: [path…] }", prompt: "tocFollow" },
+          { id: "searchF", x: 80, y: 1784, w: 250, h: 92, kind: "search", kicker: "Step 5b · Search", title: "Additional path search", sub: "Azure AI Search · no GPT", empty: "searchF" },
+          { id: "classify", x: 465, y: 1950, w: 250, h: 100, kind: "gpt", kicker: "Step 5c · GPT", title: "Classify MAIN/SUB/CONNECTOR", sub: "Expected: { main, sub, connector, ignore }", prompt: "classify" },
+          { id: "patterns", x: 465, y: 2100, w: 250, h: 92, kind: "gpt", kicker: "Step 6b · GPT", title: "Answer pattern(s)", sub: "Expected: { patterns, reason }", prompt: "patterns" },
+          { id: "lang", x: 465, y: 2244, w: 250, h: 92, kind: "logic", kicker: "Logic · regex", title: "Answer language", sub: "hiragana/katakana/kanji → ja else en", empty: "lang" },
+          { id: "ctx", x: 465, y: 2388, w: 250, h: 86, kind: "logic", kicker: "Logic", title: "Build context", sub: "PDF SAS / image map / classification", empty: "ctx" },
+          { id: "final", x: 465, y: 2526, w: 250, h: 100, kind: "gpt", kicker: "Final · GPT stream", title: "Final answer", sub: "Expected: Markdown + [[PDF:]] / [[IMG:]] · low", prompt: "final" },
+          { id: "uiPrep", x: 80, y: 2820, w: 240, h: 110, kind: "logic", kicker: "Prep · server", title: "Finalize inputs", sub: "Context / patterns / language / effort", empty: "uiPrep" },
+          { id: "uiGptOut", x: 360, y: 2820, w: 250, h: 110, kind: "logic", kicker: "What GPT outputs", title: "Markdown + citation tokens", sub: "Body / [[PDF:]] / [[IMG:]]", empty: "uiGptOut" },
+          { id: "uiHold", x: 650, y: 2820, w: 240, h: 110, kind: "logic", kicker: "Stream handling", title: "Hold incomplete tokens", sub: "Preparing links… / single buffer", empty: "uiHold" },
+          { id: "uiPaint", x: 220, y: 3000, w: 250, h: 110, kind: "logic", kicker: "Paint", title: "Stream to chat", sub: "First char ASAP / ~32ms / MD", empty: "uiPaint" },
+          { id: "uiAssets", x: 520, y: 3000, w: 250, h: 110, kind: "logic", kicker: "Paint", title: "PDF/IMG → SAS links", sub: "Clickable real links", empty: "uiAssets" }
+        ],
+        edges: [
+          ["user", "plan"],
+          ["plan", "search"],
+          ["search", "judge"],
+          ["judge", "d1"],
+          ["d1", "hybrid", "false"],
+          ["d1", "extract", "true"],
+          ["hybrid", "extract"],
+          ["extract", "multi"],
+          ["multi", "d2"],
+          ["d2", "tocF", "true"],
+          ["d2", "classify", "false"],
+          ["tocF", "searchF"],
+          ["searchF", "classify"],
+          ["classify", "patterns"],
+          ["patterns", "lang"],
+          ["lang", "ctx"],
+          ["ctx", "final"],
+          ["final", "uiPrep"],
+          ["uiPrep", "uiGptOut"],
+          ["uiGptOut", "uiHold"],
+          ["uiHold", "uiPaint"],
+          ["uiPaint", "uiAssets"]
+        ],
+        listOrder: ["user","plan","search","judge","d1","hybrid","extract","multi","d2","tocF","searchF","classify","patterns","lang","ctx","final","uiPrep","uiGptOut","uiHold","uiPaint","uiAssets"],
+        listBranches: true
+      },
+      fast: {
+        title: "Fast flow after user question",
+        hint: "Fast: TOC select → search → all hits MAIN → Context → final answer (reasoning: none). Display section matches Thinking: prep → GPT output → paint.",
+        boardW: 1180,
+        boardH: 1860,
+        frames: [
+          { x: 390, y: 24, w: 400, h: 300, title: "1. TOC select (1 GPT)" },
+          { x: 390, y: 350, w: 400, h: 520, title: "2. Search & Context" },
+          { x: 390, y: 900, w: 400, h: 220, title: "3. Final answer (No reasoning)" },
+          { x: 36, y: 1180, w: 1110, h: 600, title: "4. Answer prep & display (shared)" }
+        ],
+        nodes: [
+          { id: "user", x: 465, y: 60, w: 250, h: 86, kind: "logic", kicker: "Input", title: "User question", sub: "mode: fast · POST /api/chat/stream", empty: "userFast" },
+          { id: "plan", x: 465, y: 190, w: 250, h: 100, kind: "gpt", kicker: "GPT", title: "Search queries + initial TOC", sub: "Expected: queries / chapters JSON · none", prompt: "plan" },
+          { id: "search", x: 465, y: 396, w: 250, h: 110, kind: "search", kicker: "Search", title: "Path search → hybrid if empty", sub: "First 3 queries × top5 · cap 12", empty: "searchFast" },
+          { id: "mainAll", x: 465, y: 560, w: 250, h: 92, kind: "logic", kicker: "Logic · no GPT", title: "All hits as MAIN", sub: "No classify / extract / follow-up", empty: "mainAll" },
+          { id: "ctx", x: 465, y: 704, w: 250, h: 86, kind: "logic", kicker: "Logic", title: "Build context", sub: "patterns = ['general']", empty: "ctxFast" },
+          { id: "final", x: 465, y: 940, w: 250, h: 110, kind: "gpt", kicker: "Final · GPT stream", title: "Final answer", sub: "Expected: Markdown + tokens · none", prompt: "final" },
+          { id: "uiPrep", x: 80, y: 1240, w: 240, h: 110, kind: "logic", kicker: "Prep · server", title: "Finalize inputs", sub: "Context / general / language / none", empty: "uiPrep" },
+          { id: "uiGptOut", x: 360, y: 1240, w: 250, h: 110, kind: "logic", kicker: "What GPT outputs", title: "Markdown + citation tokens", sub: "Body / [[PDF:]] / [[IMG:]]", empty: "uiGptOut" },
+          { id: "uiHold", x: 650, y: 1240, w: 240, h: 110, kind: "logic", kicker: "Stream handling", title: "Hold incomplete tokens", sub: "Preparing links… / single buffer", empty: "uiHold" },
+          { id: "uiPaint", x: 220, y: 1420, w: 250, h: 110, kind: "logic", kicker: "Paint", title: "Stream to chat", sub: "First char ASAP / ~32ms / MD", empty: "uiPaint" },
+          { id: "uiAssets", x: 520, y: 1420, w: 250, h: 110, kind: "logic", kicker: "Paint", title: "PDF/IMG → SAS links", sub: "Clickable real links", empty: "uiAssets" }
+        ],
+        edges: [
+          ["user", "plan"],
+          ["plan", "search"],
+          ["search", "mainAll"],
+          ["mainAll", "ctx"],
+          ["ctx", "final"],
+          ["final", "uiPrep"],
+          ["uiPrep", "uiGptOut"],
+          ["uiGptOut", "uiHold"],
+          ["uiHold", "uiPaint"],
+          ["uiPaint", "uiAssets"]
+        ],
+        listOrder: ["user","plan","search","mainAll","ctx","final","uiPrep","uiGptOut","uiHold","uiPaint","uiAssets"],
+        listBranches: false
+      }
+    };
 
-    const EDGES = [
-      ["user", "queries"],
-      ["queries", "toc"],
-      ["toc", "search"],
-      ["search", "judge"],
-      ["judge", "d1"],
-      ["d1", "hybrid", "false"],
-      ["d1", "extract", "true"],
-      ["hybrid", "extract"],
-      ["extract", "multi"],
-      ["multi", "d2"],
-      ["d2", "tocF", "true"],
-      ["d2", "classify", "false"],
-      ["tocF", "searchF"],
-      ["searchF", "classify"],
-      ["classify", "patterns"],
-      ["patterns", "lang"],
-      ["lang", "ctx"],
-      ["ctx", "final"]
-    ];
+    let chatMode = "thinking";
+    let NODES = [];
+    let EDGES = [];
+    let FRAMES = [];
+    let BOARD_W = 1180, BOARD_H = 3340;
+    let byId = {};
 
-    const BOARD_W = 1180, BOARD_H = 2860;
-    const byId = Object.fromEntries(NODES.map((n) => [n.id, n]));
     const viewport = document.getElementById("viewport");
     const listEl = document.getElementById("list");
     const board = document.createElement("div");
     board.className = "board";
-    board.style.width = BOARD_W + "px";
-    board.style.height = BOARD_H + "px";
     viewport.appendChild(board);
 
-    FRAMES.forEach((f) => {
-      const el = document.createElement("div");
-      el.className = "frame";
-      el.style.left = f.x + "px";
-      el.style.top = f.y + "px";
-      el.style.width = f.w + "px";
-      el.style.height = f.h + "px";
-      el.innerHTML = `<span class="ft">${f.title}</span>`;
-      board.appendChild(el);
-    });
+    function esc(s) {
+      return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+    }
 
-    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    svg.setAttribute("class", "wires");
-    svg.setAttribute("width", BOARD_W);
-    svg.setAttribute("height", BOARD_H);
-    svg.innerHTML = `<defs>
-      <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
-        <path d="M 0 0 L 10 5 L 0 10 z" fill="#9ca3af"/>
-      </marker>
-    </defs>`;
-    board.appendChild(svg);
+    function nodeHtml(n) {
+      const chips = n.prompt ? `<span class="chips"><span class="chip sys">SYS</span><span class="chip usr">USR</span></span>` : "";
+      return `<span class="bar"></span><div class="kicker"><span>${n.kicker || ""}</span>${chips}</div><div class="title">${n.title}</div><div class="sub">${n.sub || ""}</div>`;
+    }
 
     function anchor(n, side) {
       const cx = n.x + n.w / 2, cy = n.y + n.h / 2;
@@ -600,6 +718,7 @@ stream: true`,
       return d;
     }
 
+    let svg;
     function drawEdge(a, b, label) {
       let from = "bottom", to = "top";
       if (label === "false") from = "left";
@@ -637,39 +756,71 @@ stream: true`,
       }
     }
 
-    function nodeHtml(n) {
-      const chips = n.prompt ? `<span class="chips"><span class="chip sys">SYS</span><span class="chip usr">USR</span></span>` : "";
-      return `<span class="bar"></span><div class="kicker"><span>${n.kicker || ""}</span>${chips}</div><div class="title">${n.title}</div><div class="sub">${n.sub || ""}</div>`;
-    }
+    function rebuildBoard() {
+      const cfg = MODES[chatMode];
+      FRAMES = cfg.frames;
+      NODES = cfg.nodes;
+      EDGES = cfg.edges;
+      BOARD_W = cfg.boardW;
+      BOARD_H = cfg.boardH;
+      byId = Object.fromEntries(NODES.map((n) => [n.id, n]));
+      board.innerHTML = "";
+      board.style.width = BOARD_W + "px";
+      board.style.height = BOARD_H + "px";
 
-    NODES.forEach((n) => {
-      if (n.shape === "diamond") {
+      FRAMES.forEach((f) => {
+        const el = document.createElement("div");
+        el.className = "frame";
+        el.style.left = f.x + "px";
+        el.style.top = f.y + "px";
+        el.style.width = f.w + "px";
+        el.style.height = f.h + "px";
+        el.innerHTML = `<span class="ft">${f.title}</span>`;
+        board.appendChild(el);
+      });
+
+      svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("class", "wires");
+      svg.setAttribute("width", BOARD_W);
+      svg.setAttribute("height", BOARD_H);
+      svg.innerHTML = `<defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#9ca3af"/>
+        </marker>
+      </defs>`;
+      board.appendChild(svg);
+
+      NODES.forEach((n) => {
+        if (n.shape === "diamond") {
+          const b = document.createElement("button");
+          b.className = "diamond";
+          b.style.left = n.x + "px";
+          b.style.top = n.y + "px";
+          b.dataset.id = n.id;
+          b.innerHTML = `<div class="shape"></div><div class="lab">${n.title}</div>`;
+          b.onclick = () => openNode(n.id);
+          board.appendChild(b);
+          return;
+        }
         const b = document.createElement("button");
-        b.className = "diamond";
+        b.className = "node " + n.kind;
         b.style.left = n.x + "px";
         b.style.top = n.y + "px";
+        b.style.width = n.w + "px";
+        b.style.minHeight = n.h + "px";
         b.dataset.id = n.id;
-        b.innerHTML = `<div class="shape"></div><div class="lab">${n.title}</div>`;
+        b.innerHTML = nodeHtml(n);
         b.onclick = () => openNode(n.id);
         board.appendChild(b);
-        return;
-      }
-      const b = document.createElement("button");
-      b.className = "node " + n.kind;
-      b.style.left = n.x + "px";
-      b.style.top = n.y + "px";
-      b.style.width = n.w + "px";
-      b.style.minHeight = n.h + "px";
-      b.dataset.id = n.id;
-      b.innerHTML = nodeHtml(n);
-      b.onclick = () => openNode(n.id);
-      board.appendChild(b);
-    });
-    EDGES.forEach(([a, b, label]) => drawEdge(byId[a], byId[b], label));
+      });
+      EDGES.forEach(([a, b, label]) => drawEdge(byId[a], byId[b], label));
+      renderList();
+    }
 
     function renderList() {
-      const order = ["user","queries","toc","search","judge","d1","hybrid","extract","multi","d2","tocF","searchF","classify","patterns","lang","ctx","final"];
-      const skipArrowBefore = new Set(["hybrid", "tocF", "extract", "classify"]);
+      const cfg = MODES[chatMode];
+      const order = cfg.listOrder;
+      const skipArrowBefore = new Set(["hybrid", "tocF", "extract", "classify", "uiPrep"]);
       let html = "";
       function card(id) {
         const n = byId[id];
@@ -677,16 +828,16 @@ stream: true`,
         return `<button class="list-card ${n.kind}" data-id="${id}"><span class="bar"></span><div class="kicker"><span>${n.kicker || (n.shape === "diamond" ? "Branch" : "")}</span>${chips}</div><div class="title">${n.title}</div><div class="sub">${n.sub || ""}</div></button>`;
       }
       for (const id of order) {
-        if (id === "d1") {
+        if (cfg.listBranches && id === "d1") {
           html += card("d1");
           html += `<div class="branch-row">
             <div class="branch-col"><div class="blab">false</div>${card("hybrid")}</div>
-            <div class="branch-col"><div class="blab">true</div><div class="empty" style="padding:18px 8px;text-align:center">Continue to next step</div></div>
+            <div class="branch-col"><div class="blab">true</div><div class="empty" style="padding:18px 8px;text-align:center">Continue</div></div>
           </div><div class="v-arrow"></div>`;
           continue;
         }
-        if (id === "hybrid") continue;
-        if (id === "d2") {
+        if (cfg.listBranches && id === "hybrid") continue;
+        if (cfg.listBranches && id === "d2") {
           html += card("d2");
           html += `<div class="branch-row">
             <div class="branch-col"><div class="blab">true</div>${card("tocF")}<div class="v-arrow"></div>${card("searchF")}</div>
@@ -694,7 +845,7 @@ stream: true`,
           </div><div class="v-arrow"></div>`;
           continue;
         }
-        if (id === "tocF" || id === "searchF") continue;
+        if (cfg.listBranches && (id === "tocF" || id === "searchF")) continue;
         if (!skipArrowBefore.has(id) && html) html += `<div class="v-arrow"></div>`;
         html += card(id);
       }
@@ -703,7 +854,6 @@ stream: true`,
         el.onclick = () => openNode(el.dataset.id);
       });
     }
-    renderList();
 
     let scale = 1, tx = 40, ty = 20, dragging = false, sx = 0, sy = 0, ox = 0, oy = 0, moved = false;
     const pointers = new Map();
@@ -737,6 +887,8 @@ stream: true`,
 
     viewport.addEventListener("pointerdown", (e) => {
       if (e.target.closest(".node, .diamond, .toolbtn")) return;
+      e.preventDefault();
+      window.getSelection()?.removeAllRanges();
       pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       viewport.setPointerCapture(e.pointerId);
       if (pointers.size === 1) {
@@ -753,6 +905,9 @@ stream: true`,
           my: (pts[0].y + pts[1].y) / 2
         };
       }
+    });
+    document.addEventListener("selectstart", (e) => {
+      if (dragging || (e.target instanceof Element && e.target.closest("#viewport"))) e.preventDefault();
     });
     viewport.addEventListener("pointermove", (e) => {
       if (!pointers.has(e.pointerId)) return;
@@ -792,27 +947,32 @@ stream: true`,
     };
     document.getElementById("fit").onclick = fit;
 
-    const viewBoard = document.getElementById("view-board");
-    const viewList = document.getElementById("view-list");
-    function setView(mode) {
-      const list = mode === "list";
-      listEl.classList.toggle("show", list);
-      viewport.classList.toggle("hide", list);
-      viewBoard.classList.toggle("active", !list);
-      viewList.classList.toggle("active", list);
+    listEl.classList.remove("show");
+    viewport.classList.remove("hide");
+
+    function setChatMode(mode) {
+      chatMode = mode === "fast" ? "fast" : "thinking";
+      const cfg = MODES[chatMode];
+      document.getElementById("page-title").textContent = cfg.title;
+      document.getElementById("page-hint").textContent = cfg.hint;
+      document.getElementById("mode-thinking").classList.toggle("active", chatMode === "thinking");
+      document.getElementById("mode-fast").classList.toggle("active", chatMode === "fast");
+      document.getElementById("st").textContent = "Prompt";
+      document.getElementById("ss").textContent = "Click a node";
+      document.getElementById("sb").innerHTML = `<div class="empty">Select a GPT node to see expected output examples plus System / User prompts. Use Thinking / Fast to switch the diagram.</div>`;
+      document.getElementById("win").hidden = true;
+      document.getElementById("sidebar").classList.remove("open");
+      document.getElementById("backdrop").classList.remove("show");
+      rebuildBoard();
+      focusStart();
     }
-    viewBoard.onclick = () => setView("board");
-    viewList.onclick = () => setView("list");
-    setView(window.matchMedia("(max-width: 900px)").matches ? "list" : "board");
-    focusStart();
+    document.getElementById("mode-thinking").onclick = () => setChatMode("thinking");
+    document.getElementById("mode-fast").onclick = () => setChatMode("fast");
 
     const sidebar = document.getElementById("sidebar");
     const backdrop = document.getElementById("backdrop");
     const winBtn = document.getElementById("win");
     let current = null;
-    function esc(s) {
-      return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
-    }
     function close() { sidebar.classList.remove("open"); backdrop.classList.remove("show"); }
     document.getElementById("close").onclick = close;
     backdrop.onclick = close;
@@ -831,17 +991,17 @@ stream: true`,
       document.getElementById("ss").textContent = prompt ? prompt.fn : (n.sub || n.kicker || "No GPT");
       if (!prompt) {
         winBtn.hidden = true;
-        const extra = n.id === "d1"
-          ? "Only when false: run hybrid search (embedding + Azure AI Search), merge into initial_results, then continue to element extraction."
-          : n.id === "d2"
-          ? "Only when true: run follow-up TOC selection → follow-up path search. When false, skip to chapter classification."
-          : "This step is Azure Search / app processing only. No generative AI prompt is used.";
-        document.getElementById("sb").innerHTML = `<div class="empty">${esc(n.sub || "")}<br><br>${extra}</div>`;
+        const extra = (n.empty && EMPTY[n.empty]) || "This step is Azure Search / app logic only — no generative AI prompt.";
+        document.getElementById("sb").innerHTML = `<div class="empty">${esc(n.sub || "")}<br><br>${esc(extra)}</div>`;
       } else {
         winBtn.hidden = false;
-        let html = promptBlock("sys", "System Prompt", prompt.system, "sys") + promptBlock("usr", "User Prompt", prompt.user, "usr");
+        let html = "";
+        if (prompt.sample) {
+          html += `<div class="sample"><h4>Expected GPT output (example) <button class="copy" data-t="sample">Copy</button></h4><pre id="sample">${esc(prompt.sample)}</pre></div>`;
+        }
+        html += promptBlock("sys", "System Prompt", prompt.system, "sys") + promptBlock("usr", "User Prompt", prompt.user, "usr");
         if (prompt.addons) {
-          html += `<p class="note">The final-answer System Prompt appends the following blocks depending on classification results.</p>`;
+          html += `<p class="note">Final-answer System Prompt appends the blocks below based on judgments. Thinking uses reasoning: low; Fast uses reasoning: none (No reasoning) with pattern forced to general.</p>`;
           html += prompt.addons.map((a) => `<div class="addon"><h4>${esc(a.title)}</h4><pre style="margin:0;background:transparent;border:0;padding:0">${esc(a.body)}</pre></div>`).join("");
         }
         document.getElementById("sb").innerHTML = html;
@@ -863,12 +1023,15 @@ stream: true`,
       const w = window.open("", "_blank", "noopener,noreferrer,width=920,height=820");
       if (!w) return;
       w.document.write(`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(prompt.title)}</title>
-        <style>body{font-family:ui-sans-serif,system-ui;margin:0;padding:24px;color:#111} h1{font-size:18px} h2{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#6b7280} pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:12px;font-size:12px}</style></head>
+        <style>body{font-family:ui-sans-serif,system-ui;margin:0;padding:24px;color:#111} h1{font-size:18px} h2{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#6b7280} pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:12px;font-size:12px}.sample{background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:12px;margin:0 0 16px} .sample h2{color:#2563eb}</style></head>
         <body><h1>${esc(prompt.title)}</h1><p>${esc(prompt.fn)}</p>
+        ${prompt.sample ? `<div class="sample"><h2>Expected GPT output (example)</h2><pre>${esc(prompt.sample)}</pre></div>` : ""}
         <h2>System Prompt</h2><pre>${esc(prompt.system)}</pre>
         <h2>User Prompt</h2><pre>${esc(prompt.user)}</pre></body></html>`);
       w.document.close();
     };
+
+    setChatMode("thinking");
   </script>
 </body>
 </html>
