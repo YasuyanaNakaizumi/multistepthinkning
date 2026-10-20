@@ -1,20 +1,39 @@
-node_modules
-dist
+# Dependencies & build outputs (rebuilt inside the image)
+**/node_modules
+**/dist
+**/build
+coverage
+*.tsbuildinfo
+
+# Secrets / env (never bake into the image)
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 *.pem
-*.crt
 *.key
+*.crt
 *.p12
 *.pfx
-private_key.pem
-certificate.crt
-.git
-.gitignore
-README.md
-*.md
 
-!documents.json
-!md_out_toc/
-!md_out_toc/**
+# VCS / IDE / OS
+.git
+.github
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Docs & local-only assets not needed for the root Dockerfile build
+*.md
+*.zip
+docker-compose.yml
+azure-container-app.yaml
+image
+scripts
+# Root thinking-flow copies (frontend/public copies are used instead)
+/thinking-flow.html
+/thinking-flow.en.html
+
+# documents.json and md_out_toc/ are intentionally NOT ignored —
+# root Dockerfile COPY them into the image.

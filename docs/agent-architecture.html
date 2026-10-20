@@ -1,0 +1,857 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SATORI — Conversation + Responses エージェント化</title>
+  <style>
+    :root {
+      --ink: #1c1917;
+      --muted: #57534e;
+      --line: #d6d3d1;
+      --canvas: #f8fafc;
+      --grid: #e2e8f0;
+      --blue: #2563eb;
+      --blue-soft: #dbeafe;
+      --blue-bd: #93c5fd;
+      --green-soft: #ecfdf5;
+      --green-bd: #6ee7b7;
+      --yellow: #fef3c7;
+      --yellow-bd: #f59e0b;
+      --ok-bd: #86efac;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans JP", "Hiragino Sans", "Noto Sans JP", sans-serif;
+      color: var(--ink);
+      background: #e7e5e4;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .topbar {
+      flex: 0 0 auto;
+      display: flex; align-items: center; gap: 0.75rem 1rem; flex-wrap: wrap;
+      padding: 0.65rem 1.1rem;
+      background: #fff;
+      border-bottom: 1px solid var(--line);
+    }
+    .topbar .brand { font-weight: 800; font-size: 0.95rem; margin-right: auto; }
+    .topbar .lang { font-size: 0.82rem; }
+    .topbar .lang a { color: var(--blue); text-decoration: none; font-weight: 650; }
+
+    .shell {
+      flex: 1 1 auto;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(460px, 48%);
+      min-height: 0;
+    }
+    @media (max-width: 980px) {
+      body { height: auto; overflow: auto; }
+      .shell { grid-template-columns: 1fr; }
+      .sidebar { min-height: 360px; border-left: none; border-top: 1px solid var(--line); }
+    }
+
+    .main {
+      overflow: auto; min-width: 0;
+      background:
+        linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0 / 28px 28px,
+        linear-gradient(var(--grid) 1px, transparent 1px) 0 0 / 28px 28px,
+        var(--canvas);
+    }
+    .main-inner { padding: 1.2rem 1.4rem 2.5rem; max-width: 820px; }
+
+    .hero h1 { margin: 0 0 0.4rem; font-size: clamp(1.35rem, 2.5vw, 1.85rem); letter-spacing: -0.02em; }
+    .hero p { margin: 0; color: var(--muted); font-size: 0.92rem; line-height: 1.55; max-width: 42rem; }
+    .howto {
+      margin: 0.85rem 0 1.2rem;
+      border: 1.5px solid var(--blue-bd);
+      background: #eff6ff;
+      border-radius: 12px;
+      padding: 0.7rem 0.9rem;
+      font-size: 0.84rem;
+      color: #1e3a8a;
+      max-width: 520px;
+    }
+    .howto strong { display: block; margin-bottom: 0.15rem; }
+
+    .flow { display: flex; flex-direction: column; align-items: stretch; max-width: 760px; }
+
+    .connector {
+      display: flex; flex-direction: column; align-items: center;
+      height: 40px; position: relative; margin: 0 auto;
+    }
+    .connector .shaft { width: 3px; flex: 1; background: #94a3b8; border-radius: 2px; }
+    .connector .head {
+      width: 0; height: 0;
+      border-left: 7px solid transparent;
+      border-right: 7px solid transparent;
+      border-top: 10px solid #94a3b8;
+    }
+    .connector .label {
+      position: absolute; left: calc(50% + 10px); top: 50%; transform: translateY(-50%);
+      font-size: 0.68rem; font-weight: 800; color: #64748b;
+      background: var(--canvas); padding: 0 0.3rem; white-space: nowrap;
+    }
+
+    .card {
+      appearance: none; width: 100%; text-align: left; font: inherit; color: inherit;
+      border-radius: 14px; border: 2px solid var(--line); background: #fff;
+      padding: 0.85rem 1rem; cursor: pointer;
+      box-shadow: 0 6px 16px rgba(15, 23, 42, 0.06);
+      transition: border-color .12s, box-shadow .12s, transform .12s;
+    }
+    .card:hover, .card:focus-visible {
+      transform: translateY(-1px);
+      border-color: var(--blue);
+      box-shadow: 0 10px 22px rgba(37, 99, 235, 0.12);
+      outline: none;
+    }
+    .card.active {
+      border-color: var(--blue);
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.22), 0 10px 22px rgba(37, 99, 235, 0.1);
+    }
+    .card .step { font-size: 0.7rem; font-weight: 800; letter-spacing: .04em; color: #78716c; margin-bottom: .2rem; }
+    .card h3 { margin: 0 0 .3rem; font-size: 1.02rem; }
+    .card p { margin: 0; font-size: .84rem; color: var(--muted); line-height: 1.45; }
+    .card .cta {
+      margin-top: .55rem; display: inline-block;
+      font-size: .74rem; font-weight: 700; color: var(--blue);
+      background: var(--blue-soft); border-radius: 999px; padding: .2rem .65rem;
+    }
+    .card.input {
+      background: var(--yellow); border-color: var(--yellow-bd);
+      max-width: 380px; align-self: center;
+    }
+    .card.input .step { color: #92400e; }
+    .card.ok { background: #f0fdf4; border-color: var(--ok-bd); max-width: 380px; align-self: center; }
+    .card.store { background: #f8fafc; border-color: #94a3b8; }
+
+    /* Agent + tools: small agent, horizontal wires */
+    .agent-frame {
+      border: 2.5px solid #60a5fa;
+      background: rgba(219, 234, 254, 0.4);
+      border-radius: 18px;
+      padding: 0.9rem 1rem;
+      display: grid;
+      grid-template-columns: 168px 88px minmax(0, 1fr);
+      gap: 0.35rem;
+      align-items: center;
+    }
+    @media (max-width: 720px) {
+      .agent-frame {
+        grid-template-columns: 1fr;
+        justify-items: stretch;
+      }
+      .h-link { flex-direction: row; height: 48px; width: 100%; }
+      .h-link .rail { width: 100%; height: 36px; }
+    }
+
+    .card.agent {
+      width: 168px;
+      padding: 0.65rem 0.7rem;
+      background: linear-gradient(180deg, #3b82f6, #2563eb);
+      border-color: #1d4ed8;
+      color: #fff;
+      align-self: center;
+    }
+    .card.agent .step { color: rgba(255,255,255,.85); font-size: 0.62rem; }
+    .card.agent h3 { color: #fff; font-size: 0.92rem; margin-bottom: 0.2rem; }
+    .card.agent p { color: rgba(255,255,255,.88); font-size: 0.72rem; line-height: 1.35; }
+    .card.agent .cta {
+      margin-top: 0.4rem;
+      background: rgba(255,255,255,.18);
+      color: #fff;
+      font-size: 0.66rem;
+      padding: 0.15rem 0.5rem;
+    }
+
+    .h-link {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.45rem;
+      color: var(--blue);
+      font-size: 0.62rem;
+      font-weight: 800;
+    }
+    .h-row {
+      display: flex;
+      align-items: center;
+      width: 100%;
+      gap: 0.2rem;
+    }
+    .h-row .lbl { flex: 0 0 auto; min-width: 1.8rem; text-align: center; }
+    .h-row .line {
+      flex: 1 1 auto;
+      height: 3px;
+      background: var(--blue);
+      border-radius: 2px;
+    }
+    .h-row .arr-r {
+      width: 0; height: 0;
+      border-top: 6px solid transparent;
+      border-bottom: 6px solid transparent;
+      border-left: 9px solid var(--blue);
+    }
+    .h-row .arr-l {
+      width: 0; height: 0;
+      border-top: 6px solid transparent;
+      border-bottom: 6px solid transparent;
+      border-right: 9px solid var(--blue);
+    }
+    .h-link .again {
+      font-size: 0.6rem;
+      color: #1d4ed8;
+      letter-spacing: 0.02em;
+    }
+
+    .tools-pane {
+      background: var(--green-soft);
+      border: 2px solid var(--green-bd);
+      border-radius: 14px;
+      padding: 0.65rem 0.7rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+      min-width: 0;
+    }
+    .tools-pane .pane-h { margin: 0; font-size: 0.9rem; font-weight: 800; color: #065f46; }
+    .tools-pane .pane-s { margin: -0.1rem 0 0.15rem; font-size: 0.72rem; color: #047857; }
+    .tool-card {
+      appearance: none; width: 100%; text-align: left; font: inherit; color: inherit;
+      background: #fff; border: 1.5px solid #a7f3d0; border-radius: 10px;
+      padding: 0.55rem 0.65rem; cursor: pointer;
+      transition: border-color .12s, box-shadow .12s;
+    }
+    .tool-card:hover, .tool-card:focus-visible, .tool-card.active {
+      border-color: var(--blue);
+      box-shadow: 0 0 0 2px rgba(37,99,235,.16);
+      outline: none;
+    }
+    .tool-card .badge {
+      display: inline-block; font-size: 0.62rem; font-weight: 800;
+      padding: 0.08rem 0.35rem; border-radius: 4px; margin-bottom: 0.2rem;
+      background: #d1fae5; color: #065f46;
+    }
+    .tool-card .badge.ext { background: #e0e7ff; color: #3730a3; }
+    .tool-card .name { margin: 0 0 0.12rem; font-size: 0.84rem; font-weight: 750; }
+    .tool-card .desc { margin: 0; font-size: 0.72rem; color: var(--muted); }
+    .tool-card .cta { margin-top: 0.3rem; font-size: 0.7rem; font-weight: 700; color: var(--blue); }
+
+    .storage-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+    @media (max-width: 640px) { .storage-row { grid-template-columns: 1fr; } }
+    .footnote {
+      margin-top: 1rem; font-size: 0.82rem; color: var(--muted);
+      border-left: 3px solid var(--blue); padding-left: 0.7rem;
+    }
+    code { font-family: ui-monospace, Consolas, monospace; font-size: 0.84em; background: #efe9df; padding: 0.05rem 0.28rem; border-radius: 3px; }
+
+    .sidebar {
+      background: #fff; border-left: 1px solid var(--line);
+      display: flex; flex-direction: column; min-height: 0;
+    }
+    .sidebar .sh {
+      flex: 0 0 auto; padding: 0.9rem 1.15rem;
+      border-bottom: 1px solid var(--line);
+      display: flex; align-items: center; gap: 0.5rem;
+    }
+    .sidebar .sh h2 { margin: 0; font-size: 1.05rem; flex: 1; }
+    .sidebar .sh button {
+      appearance: none; border: 1px solid var(--line); background: #f5f5f4;
+      border-radius: 8px; padding: 0.28rem 0.6rem; font-size: 0.78rem; cursor: pointer;
+    }
+    .side-tabs {
+      flex: 0 0 auto; display: none; gap: 0.3rem; flex-wrap: wrap;
+      padding: 0.65rem 1.15rem 0;
+    }
+    .side-tabs.show { display: flex; }
+    .side-tabs button {
+      appearance: none; border: 1px solid var(--line); background: #fafaf9;
+      border-radius: 8px; padding: 0.32rem 0.65rem; font-size: 0.74rem; font-weight: 700;
+      cursor: pointer; color: var(--muted);
+    }
+    .side-tabs button.active { background: #1c1917; color: #fff; border-color: #1c1917; }
+    .sidebar .tags {
+      flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 0.3rem;
+      padding: 0.6rem 1.15rem 0;
+    }
+    .sidebar .tag {
+      font-size: 0.7rem; padding: 0.12rem 0.5rem; border-radius: 999px;
+      background: #f5f5f4; border: 1px solid var(--line); color: var(--muted);
+    }
+    .sidebar .src { padding: 0.35rem 1.15rem 0; font-size: 0.74rem; color: #a8a29e; }
+    .sidebar .body {
+      flex: 1 1 auto; overflow: auto;
+      padding: 0.85rem 1.15rem 1.5rem;
+      font-size: 0.88rem; line-height: 1.55;
+    }
+    .sidebar .body.placeholder { color: var(--muted); }
+    .sidebar .body h3 { margin: 0 0 0.5rem; font-size: 1.05rem; }
+    .sidebar .body h4 { margin: 0.9rem 0 0.35rem; font-size: 0.9rem; }
+    .sidebar .body ul { margin: 0.35rem 0; padding-left: 1.1rem; }
+    .sidebar .body li + li { margin-top: 0.22rem; }
+    .sidebar .body pre {
+      margin: 0.4rem 0 0;
+      white-space: pre-wrap; word-break: break-word;
+      background: #1c1917; color: #e7e5e4;
+      padding: 0.85rem; border-radius: 10px;
+      font-size: 0.74rem; line-height: 1.45;
+      max-height: 55vh; overflow: auto;
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="brand">SATORI · エージェント化仕様</div>
+    <div class="lang"><a href="agent-architecture.en.html">English</a></div>
+  </div>
+
+  <div class="shell">
+    <div class="main">
+      <div class="main-inner">
+        <div class="hero">
+          <h1>構成図 — 単一エージェント + ツール</h1>
+          <p>依頼 → エージェント → 回答が本線です。足りない情報は横線でつながったツールを呼び、結果を見てまた判断します。カードをクリックすると右にプロンプトやツール仕様が出ます。</p>
+          <div class="howto">
+            <strong>見方</strong>
+            メイン GPT（左・小さめ）とツール群（右）を横線で接続しています。エージェントをクリックするとシステム／ユーザープロンプト、ツールをクリックすると説明・引数・出力サンプルが表示されます。
+          </div>
+        </div>
+
+        <div class="flow">
+          <button type="button" class="card input" data-detail="user-q">
+            <div class="step">1. 入力</div>
+            <h3>ユーザーの依頼</h3>
+            <p>エラーコード / 手順 / 仕様 / 翻訳・要約 など</p>
+            <span class="cta">クリックして詳細</span>
+          </button>
+
+          <div class="connector" aria-hidden="true"><div class="shaft"></div><div class="head"></div></div>
+
+          <div class="agent-frame">
+            <button type="button" class="card agent" data-detail="agent">
+              <div class="step">2. エージェント</div>
+              <h3>メイン GPT</h3>
+              <p>Responses API<br>判断・呼出・回答</p>
+              <span class="cta">プロンプト表示</span>
+            </button>
+
+            <div class="h-link" aria-hidden="true">
+              <div class="h-row">
+                <span class="lbl">呼ぶ</span>
+                <div class="line"></div>
+                <div class="arr-r"></div>
+              </div>
+              <div class="h-row">
+                <div class="arr-l"></div>
+                <div class="line"></div>
+                <span class="lbl">結果</span>
+              </div>
+              <div class="again">↓ また判断</div>
+            </div>
+
+            <div class="tools-pane">
+              <p class="pane-h">呼べるツール</p>
+              <p class="pane-s">必要なものだけ自律選択（実装 + 拡張例）</p>
+
+              <button type="button" class="tool-card" data-detail="tool-toc">
+                <span class="badge">実装済</span>
+                <p class="name">get_toc_bookmarks</p>
+                <p class="desc">しおり / TOC 一覧</p>
+                <div class="cta">説明 · 引数 · 出力サンプル</div>
+              </button>
+              <button type="button" class="tool-card" data-detail="tool-fetch">
+                <span class="badge">実装済</span>
+                <p class="name">fetch_chapters_by_paths</p>
+                <p class="desc">章本文 · 画像説明 · PDF</p>
+                <div class="cta">説明 · 引数 · 出力サンプル</div>
+              </button>
+              <button type="button" class="tool-card" data-detail="tool-error">
+                <span class="badge ext">拡張例</span>
+                <p class="name">エラー履歴呼び出し</p>
+                <p class="desc">車両 / 案件の故障履歴</p>
+                <div class="cta">説明 · 引数 · 出力サンプル</div>
+              </button>
+              <button type="button" class="tool-card" data-detail="tool-spec">
+                <span class="badge ext">拡張例</span>
+                <p class="name">仕様呼び出し</p>
+                <p class="desc">トルク · 限界値など</p>
+                <div class="cta">説明 · 引数 · 出力サンプル</div>
+              </button>
+            </div>
+          </div>
+
+          <div class="connector" aria-hidden="true">
+            <div class="shaft"></div><div class="head"></div>
+            <span class="label">phase: final_answer</span>
+          </div>
+
+          <button type="button" class="card ok" data-detail="answer">
+            <div class="step">3. 回答</div>
+            <h3>ユーザー向け回答</h3>
+            <p>同一エージェント・同一ストリーム。reasoning のあと phase=final_answer で出力。</p>
+            <span class="cta">クリックして詳細</span>
+          </button>
+
+          <div class="connector" aria-hidden="true"><div class="shaft"></div><div class="head"></div></div>
+
+          <div class="storage-row">
+            <button type="button" class="card store" data-detail="store-conv">
+              <div class="step">保存 A</div>
+              <h3>Conversations</h3>
+              <p>ツール往復込みのエージェント記憶。conversationId で再開。</p>
+              <span class="cta">詳細</span>
+            </button>
+            <button type="button" class="card store" data-detail="store-cosmos">
+              <div class="step">保存 B</div>
+              <h3>Cosmos（画面履歴）</h3>
+              <p>チャット表示・履歴一覧はここから読む。</p>
+              <span class="cta">詳細</span>
+            </button>
+          </div>
+        </div>
+        <p class="footnote">Fast = reasoning <code>low</code> / Thinking = <code>medium</code>（どちらも <code>summary: auto</code>, <code>context: all_turns</code>）。コア構造は共通です。</p>
+      </div>
+    </div>
+
+    <aside class="sidebar">
+      <div class="sh">
+        <h2>詳細</h2>
+        <button type="button" id="side-clear">クリア</button>
+      </div>
+      <div class="side-tabs" id="side-tabs"></div>
+      <div class="tags" id="side-tags"></div>
+      <div class="src" id="side-src"></div>
+      <div class="body placeholder" id="side-body">
+        左のカードをクリックしてください。<br><br>
+        エージェント → システム / ユーザープロンプト<br>
+        ツール → 説明・引数・出力サンプル
+      </div>
+    </aside>
+  </div>
+
+  <script>
+    function escapePre(s) {
+      return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    const SYSTEM_PROMPT = `You are an assistant supporting a mechanical engineer.
+
+Main instruction: Answer the user's question appropriately（ユーザーの質問に適切に回答すること）.
+That is the primary goal. Decide whether tools are needed based on the evidence required for this question.
+
+Selected manuals: {documentLabels}
+
+Decision for retrieval:
+- Retrieve when the current question cannot be answered accurately from the current conversation's relevant evidence, or when the user explicitly asks to look up/check the manual.
+- Reuse prior evidence for clarification, summary, or a narrow fact when it directly covers the current question.
+- A topic change usually requires new chapter evidence via fetch_chapters_by_paths, but do NOT re-call get_toc_bookmarks when a usable TOC is already in this conversation — reuse that TOC and fetch new paths.
+- Do not retrieve if the user is only making a conversational remark that needs no manual facts.
+- In Thinking mode, after the first fetch inside the same turn, a second fetch is required when the fetched body text itself points to missing sections or connectors (see MODE: Thinking). Do not skip that second fetch.
+- Never use a brief mention, an unrelated chapter, or generic memory as a substitute for evidence.
+
+Pipeline:
+1) Call get_toc_bookmarks only when no usable TOC is already available in this conversation.
+2) Call fetch_chapters_by_paths with exact relevant tree paths from the (prior or just-loaded) TOC.
+3) Thinking only: if the fetched body text references another section or needs connector/layout evidence not yet fetched, call fetch_chapters_by_paths again with those exact new paths before answering.
+4) You write the final answer from those results (same agent — no separate answer model).
+
+Conversation continuity: reuse relevant prior evidence and prior TOC when still available, but do not let a previous topic, template, or answer format determine the response to a new question.
+
+{MODE: Fast | Thinking}
+
+{Answer Creation Rules}`;
+
+    const MODE_FAST = `MODE: Fast
+- Use tools when the current question needs manual evidence that is not already available.
+- If a complete TOC is already available in this conversation, do NOT call get_toc_bookmarks again — call fetch_chapters_by_paths directly.
+- Prefer focused paths. Do not seek additional material unless necessary.
+- tool_choice is auto; the host does not force a tool.`;
+
+    const MODE_THINKING = `MODE: Thinking
+- Use tools when the current question needs manual evidence that is not already available.
+- Reuse TOC when available; do not re-call get_toc_bookmarks unnecessarily.
+- After EVERY first fetch, read MAIN body text and decide whether a second fetch is required BEFORE answering.
+- MUST call fetch_chapters_by_paths again when body has:
+  1) 「〜を参照」/ see / refer-to section not yet fetched
+  2) connector IDs without connector list/layout chapters
+  3) other body-named missing evidence
+- At most TWO fetch_chapters_by_paths calls this turn.
+- tool_choice is auto.`;
+
+    const CONTINUE_PROMPT = `Follow-up in the same Conversation (Conversations API + Responses).
+Selected manuals: {documentLabels}.
+Mode: {mode}.
+Main instruction: Handle the user's request appropriately（ユーザーの要望に適切に対処しなさい）.
+Use prior tool results when they directly answer the current question.
+If evidence is insufficient: call fetch_chapters_by_paths with exact paths.
+If a complete TOC is still available, reuse it — do NOT call get_toc_bookmarks again.
+After a fetch in Thinking mode, inspect body text; second-fetch if cross-refs / connectors are missing.
+tool_choice is auto; the host does not force tools.
+You MAY reuse [[PDF:shop-N]] / [[IMG:]] tokens from earlier turns.
+
+{user query}`;
+
+    const ANSWER_PROMPT = `Continue as the SAME main agent. Tool results are now available — write the complete user-facing answer now. Do not call tools.
+
+Primary goal: answer the user's question appropriately. Follow Answer Creation Rules.
+- ALWAYS begin with a 3-4 sentence Summary.
+- Whole error-code / procedure → full template (Connector / Component / Required Tools when applicable).
+- Narrower questions → answer directly after Summary.
+- Use only facts from fetched chapters. Cite [[PDF:shop-N]] / [[IMG:]] sparingly.
+- Connector table columns (exact):
+| Connector No. | Connector Type | Number of pins | Installation position | Address |`;
+
+    const DETAILS = {
+      "user-q": {
+        title: "ユーザーの依頼",
+        src: "チャット入力",
+        tags: ["入力"],
+        html: `<p>ユーザーが送る自然言語の依頼です。</p>
+<ul>
+<li><strong>ツール不要になりやすい</strong>: 前会話から回答可能で、ツール検索が不要な場合</li>
+<li><strong>ツールが必要</strong>: 故障コード診断、分解手順、仕様・コネクタ確認</li>
+</ul>
+<p>メインエージェントが <code>tool_choice: auto</code> で要否を判断します。</p>`
+      },
+      "agent": {
+        title: "メインエージェント（Responses）",
+        src: "responseAgent.ts · buildSystemPrompt / buildContinueInput",
+        tags: ["Responses", "プロンプト", "JSON"],
+        tabs: [
+          { id: "req", label: "Request JSON" },
+          { id: "sys", label: "System" },
+          { id: "fast", label: "MODE Fast" },
+          { id: "think", label: "MODE Thinking" },
+          { id: "cont", label: "Continue (User)" }
+        ],
+        panels: {
+          req: `<h4>Responses API — リクエスト本体</h4>
+<p>Conversations で発行した <code>conversation_id</code> を渡し、同一 Agents ループでツール・reasoning・最終回答を行います。</p>
+<pre>${escapePre(`POST {conversationsBase}/responses
+{
+  "model": "{AZURE_OPENAI_DEPLOYMENT_NAME}",
+  "conversation": "{conversation_id}",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [{ "type": "input_text", "text": "{user_message}" }]
+    }
+  ],
+  "tools": [ /* get_toc_bookmarks, fetch_chapters_by_paths, ... */ ],
+  "tool_choice": "auto",
+  "store": true,
+  "stream": true,
+  "reasoning": {
+    "effort": "low" | "medium",
+    "summary": "auto",
+    "context": "all_turns"
+  }
+}`)}</pre>
+<h4>input のバリエーション</h4>
+<pre>${escapePre(`// 初回（Conversation 新規）
+"input": [
+  { "type": "message", "role": "system", "content": [{ "type": "input_text", "text": "{system_prompt}" }] },
+  { "type": "message", "role": "user",   "content": [{ "type": "input_text", "text": "{user_message}" }] }
+]
+
+// フォローアップ（同じ conversation_id）
+"input": [
+  { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "{continue_prompt + user_message}" }] }
+]
+
+// ツール結果返却後（同じ conversation_id）
+"input": [
+  { "type": "function_call_output", "call_id": "call_xxx", "output": "{json_string}" }
+]`)}</pre>
+<p>フォールバック時のみ <code>previous_response_id</code> を使い、<code>conversation</code> は付けません。</p>`,
+          sys: `<h4>System Prompt（共通）</h4><p>初回ターンの system メッセージ。末尾に MODE と Answer Creation Rules が連結されます。</p><pre>${escapePre(SYSTEM_PROMPT)}</pre>`,
+          fast: `<h4>MODE: Fast</h4><p><code>reasoning: { effort: "low", summary: "auto", context: "all_turns" }</code> · fetch 原則 1 回</p><pre>${escapePre(MODE_FAST)}</pre>`,
+          think: `<h4>MODE: Thinking</h4><p><code>reasoning: { effort: "medium", summary: "auto", context: "all_turns" }</code> · fetch 最大 2 回</p><pre>${escapePre(MODE_THINKING)}</pre>`,
+          cont: `<h4>Continue Prompt（フォローアップ · role: user）</h4><p>同一 Conversation の次ターン。末尾に今回の質問を連結。</p><pre>${escapePre(CONTINUE_PROMPT)}</pre>`
+        }
+      },
+      "answer": {
+        title: "最終回答（phase: final_answer）",
+        src: "responseAgent.ts · streamResponsesTurn + reasoning",
+        tags: ["Answer", "Reasoning", "Responses"],
+        html: `<p>Answer 用の別呼び出しはありません。ツール往復と同じエージェントが、同一 Responses ストリームで回答します。</p>
+<ul>
+<li>Fast: <code>effort: "low"</code> / Thinking: <code>effort: "medium"</code>（どちらも <code>summary: "auto"</code>, <code>context: "all_turns"</code>）</li>
+<li>途中の reasoning summary は画面にうっすら表示し、次パートで上書き、final_answer 開始で消す</li>
+<li>ユーザー向け本文は <code>phase === "final_answer"</code> のときだけストリーム</li>
+</ul>
+<h4>ストリームで見るイベント（要約）</h4>
+<pre>${escapePre(`response.reasoning_summary_text.delta  → UI にうっすら表示（上書き）
+response.output_item.added (message, phase=final_answer)
+response.output_text.delta             → ユーザー向け回答として表示
+`)}</pre>
+<h4>参考（旧 Answer Prompt・System に統合済み）</h4>
+<pre>${escapePre(ANSWER_PROMPT)}</pre>
+<p>Answer Creation Rules（要約必須・コネクタ5列など）は System 側に含まれます。</p>`
+      },
+      "tool-toc": {
+        title: "get_toc_bookmarks",
+        src: "agentTools.ts · AGENT_TOOL_DEFINITIONS",
+        tags: ["Tool", "実装済"],
+        tabs: [
+          { id: "desc", label: "説明" },
+          { id: "in", label: "引数" },
+          { id: "out", label: "出力サンプル" }
+        ],
+        panels: {
+          desc: `<p>選択マニュアルのしおり / TOC 一覧をメインエージェントに返します。</p>
+<ul>
+<li>パス選定・章取得はしない（内側 GPT なし）</li>
+<li>Conversation に TOC が残っていればフォローアップで再実行不要</li>
+<li>直後に <code>fetch_chapters_by_paths</code> を呼ぶのが基本</li>
+</ul>
+<h4>Description（API 定義）</h4>
+<pre>${escapePre(`Retrieve the complete manual bookmark/TOC list for the selected documents and return it to the main agent. Call this only when no usable TOC is already available in the conversation. Skip it on follow-up turns if a prior TOC result is still present — go straight to fetch_chapters_by_paths. This tool only loads the TOC; it does not select paths, call another GPT, or fetch chapter text.`)}</pre>`,
+          in: `<h4>Parameters</h4>
+<pre>${escapePre(`{
+  "documentNumbers"?: string[]
+  // Optional subset of selected document numbers.
+  // Empty / omitted = all selected manuals.
+}`)}</pre>
+<h4>呼び出し例</h4>
+<pre>${escapePre(`{
+  "documentNumbers": ["SEN06867-01", "PENC1607-04"]
+}`)}</pre>`,
+          out: `<h4>成功時サンプル</h4>
+<pre>${escapePre(`{
+  "ok": true,
+  "tocContent": "## SEN06867-01\\n- FAILURE CODE [CA441]\\n- CONNECTOR LIST AND LAYOUT\\n...",
+  "tocEntryCount": 1408,
+  "documentNumbers": ["SEN06867-01", "PENC1607-04"],
+  "tocCached": true,
+  "hint": "Main agent: immediately call fetch_chapters_by_paths with exact tree paths from tocContent."
+}`)}</pre>`
+        }
+      },
+      "tool-fetch": {
+        title: "fetch_chapters_by_paths",
+        src: "agentTools.ts · AGENT_TOOL_DEFINITIONS",
+        tags: ["Tool", "実装済"],
+        tabs: [
+          { id: "desc", label: "説明" },
+          { id: "in", label: "引数" },
+          { id: "out", label: "出力サンプル" }
+        ],
+        panels: {
+          desc: `<p>メインエージェントが選んだ TOC パスの章本文・画像説明・PDF citation を取得します。</p>
+<ul>
+<li>TOC 選定や内側 GPT は行わない</li>
+<li>Thinking では本文ギャップ時に 2 回目（followUp）があり得る</li>
+<li>返却の <code>[[PDF:shop-N]]</code> / 画像名を回答に使用</li>
+</ul>
+<h4>Description（API 定義）</h4>
+<pre>${escapePre(`Fetch chapter text and image explanations for exact TOC tree paths chosen by the main agent from the current or previously loaded TOC in this conversation. Do not require a fresh get_toc_bookmarks when a prior TOC is still available. This tool performs no TOC selection and calls no inner GPT. Returns context, image_explanation, [[PDF:shop-N]].`)}</pre>`,
+          in: `<h4>Parameters</h4>
+<pre>${escapePre(`{
+  "paths": string[],          // required — exact TOC path strings
+  "documentNumbers"?: string[],
+  "followUp"?: boolean        // additional fetch (stricter cap)
+}`)}</pre>
+<h4>呼び出し例</h4>
+<pre>${escapePre(`{
+  "paths": [
+    "SEN06867-01/TROUBLESHOOTING/FAILURE CODE [CA441]",
+    "SEN06867-01/TROUBLESHOOTING/CONNECTOR LIST AND LAYOUT"
+  ],
+  "followUp": false
+}`)}</pre>`,
+          out: `<h4>成功時サンプル（要約）</h4>
+<pre>${escapePre(`{
+  "ok": true,
+  "chapterCount": 2,
+  "followUp": false,
+  "chapters": [
+    {
+      "documentNumber": "SEN06867-01",
+      "title": "FAILURE CODE [CA441]",
+      "path": "…/FAILURE CODE [CA441]",
+      "context": "（章本文）…",
+      "image_explanation": "…",
+      "available_images": ["ca441_fig1.jpg"],
+      "PDF_CITATION_TOKEN": "[[PDF:shop-1]]"
+    }
+  ]
+}`)}</pre>`
+        }
+      },
+      "tool-error": {
+        title: "エラー履歴呼び出し（拡張例）",
+        src: "仕様上の拡張ツール",
+        tags: ["Tool", "拡張例"],
+        tabs: [
+          { id: "desc", label: "説明" },
+          { id: "in", label: "引数" },
+          { id: "out", label: "出力サンプル" }
+        ],
+        panels: {
+          desc: `<p>車両・案件に紐づくエラー / 故障履歴を返す想定のツールです。</p>
+<ul>
+<li>マニュアル章とは別データソース</li>
+<li>エージェントが「履歴が必要」と判断したときだけ呼ぶ</li>
+<li>現行ショップマニュアル実装には未接続（設計例）</li>
+</ul>`,
+          in: `<pre>${escapePre(`{
+  "machineId": "PC200-11-XXXX",
+  "from": "2026-01-01",
+  "to": "2026-10-01",
+  "codes"?: ["CA441", "B@BAZG"]
+}`)}</pre>`,
+          out: `<pre>${escapePre(`{
+  "ok": true,
+  "events": [
+    { "at": "2026-09-12T08:11:00Z", "code": "CA441", "count": 3 },
+    { "at": "2026-09-18T14:02:00Z", "code": "B@BAZG", "count": 1 }
+  ]
+}`)}</pre>`
+        }
+      },
+      "tool-spec": {
+        title: "仕様呼び出し（拡張例）",
+        src: "仕様上の拡張ツール",
+        tags: ["Tool", "拡張例"],
+        tabs: [
+          { id: "desc", label: "説明" },
+          { id: "in", label: "引数" },
+          { id: "out", label: "出力サンプル" }
+        ],
+        panels: {
+          desc: `<p>トルク・クリアランス・電装仕様などスペック特化の取得。</p>
+<p>章テキスト全体の fetch と使い分け可能。</p>`,
+          in: `<pre>${escapePre(`{
+  "documentNumber": "SEN06867-01",
+  "query": "supply voltage limit CA441"
+}`)}</pre>`,
+          out: `<pre>${escapePre(`{
+  "ok": true,
+  "specs": [
+    { "name": "Supply voltage", "value": "20–30 V", "condition": "engine running" }
+  ]
+}`)}</pre>`
+        }
+      },
+      "store-conv": {
+        title: "Conversations（エージェント記憶）",
+        src: "Azure Conversations API",
+        tags: ["Conversations", "JSON"],
+        html: `<ul>
+<li>ツール往復・回答を含む会話状態の正本</li>
+<li>次ターンは同じ <code>conversationId</code> で Responses を呼ぶ</li>
+<li>画面の吹き出し正本にはしない</li>
+</ul>
+<h4>Conversation 作成</h4>
+<pre>${escapePre(`POST {conversationsBase}/conversations
+{
+  "metadata": {
+    "chatSessionId": "{session}",
+    "mode": "fast" | "thinking"
+  }
+}
+→ { "id": "conv_xxx", ... }`)}</pre>
+<h4>Responses で継続（要点）</h4>
+<pre>${escapePre(`POST {conversationsBase}/responses
+{
+  "conversation": "conv_xxx",
+  "input": [ /* user message or function_call_output */ ],
+  "reasoning": {
+    "effort": "low" | "medium",
+    "summary": "auto",
+    "context": "all_turns"
+  },
+  "tools": [ ... ],
+  "tool_choice": "auto",
+  "store": true,
+  "stream": true
+}`)}</pre>`
+      },
+      "store-cosmos": {
+        title: "Cosmos（画面用会話履歴）",
+        src: "Storage",
+        tags: ["Cosmos", "UI"],
+        html: `<p><strong>会話履歴は Cosmos に切り出し、画面表示は Cosmos から実施</strong>します。</p>
+<ul>
+<li>ユーザー向けの質問 / 回答テキスト</li>
+<li>履歴一覧・再表示・監査</li>
+<li>Conversations の tool 生ログとは責務分離</li>
+</ul>`
+      }
+    };
+
+    const sideTabs = document.getElementById("side-tabs");
+    const sideTags = document.getElementById("side-tags");
+    const sideSrc = document.getElementById("side-src");
+    const sideBody = document.getElementById("side-body");
+    let activeEl = null;
+
+    function renderPanel(detail, panelId) {
+      if (!detail.panels) return;
+      sideBody.classList.remove("placeholder");
+      sideBody.innerHTML = `<h3>${detail.title}</h3>` + (detail.panels[panelId] || "");
+      sideTabs.querySelectorAll("button").forEach((b) => {
+        b.classList.toggle("active", b.dataset.panel === panelId);
+      });
+    }
+
+    function showDetail(id, el) {
+      const detail = DETAILS[id];
+      if (!detail) return;
+      sideSrc.textContent = detail.src || "";
+      sideTags.innerHTML = "";
+      (detail.tags || []).forEach((t) => {
+        const s = document.createElement("span");
+        s.className = "tag";
+        s.textContent = t;
+        sideTags.appendChild(s);
+      });
+
+      sideTabs.innerHTML = "";
+      if (detail.tabs && detail.panels) {
+        sideTabs.classList.add("show");
+        detail.tabs.forEach((tab, i) => {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.textContent = tab.label;
+          b.dataset.panel = tab.id;
+          if (i === 0) b.classList.add("active");
+          b.addEventListener("click", () => renderPanel(detail, tab.id));
+          sideTabs.appendChild(b);
+        });
+        renderPanel(detail, detail.tabs[0].id);
+      } else {
+        sideTabs.classList.remove("show");
+        sideBody.classList.remove("placeholder");
+        sideBody.innerHTML = `<h3>${detail.title}</h3>` + (detail.html || "");
+      }
+
+      if (activeEl) activeEl.classList.remove("active");
+      if (el) { el.classList.add("active"); activeEl = el; }
+    }
+
+    function clearDetail() {
+      sideTabs.classList.remove("show");
+      sideTabs.innerHTML = "";
+      sideTags.innerHTML = "";
+      sideSrc.textContent = "";
+      sideBody.classList.add("placeholder");
+      sideBody.innerHTML = "左のカードをクリックしてください。<br><br>エージェント → システム / ユーザープロンプト<br>ツール → 説明・引数・出力サンプル";
+      if (activeEl) activeEl.classList.remove("active");
+      activeEl = null;
+    }
+
+    document.querySelectorAll("[data-detail]").forEach((el) => {
+      el.addEventListener("click", () => showDetail(el.getAttribute("data-detail"), el));
+    });
+    document.getElementById("side-clear").addEventListener("click", clearDetail);
+  </script>
+</body>
+</html>

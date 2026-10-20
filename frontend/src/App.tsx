@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { Button } from './components/ui/button';
 import { ChatMessage } from './components/ChatMessage';
-import { ThinkingProcess } from './components/ThinkingProcess';
+import { ThinkingProcess, LiveReasoningSummary } from './components/ThinkingProcess';
 import { fetchAzureAdUser, signOutAzureAd } from './lib/azureAd';
 import {
   Send,
@@ -190,6 +190,16 @@ function App() {
   } | null>(null);
   const [streamAnswerReasoningEffort, setStreamAnswerReasoningEffort] = useState<string | null>(null);
   const [streamHolding, setStreamHolding] = useState(false);
+  /** Live reasoning for faint main-screen overlay (cleared when final answer streams). */
+  const [streamReasoningSummary, setStreamReasoningSummary] = useState<LiveReasoningSummary>({
+    active: false,
+    text: null,
+  });
+  /** Retained reasoning parts for Thinking Process (kept after answer starts; anchored to step index). */
+  const [reasoningHistory, setReasoningHistory] = useState<
+    Array<{ text: string | null; afterStepIndex?: number }>
+  >([]);
+  const liveReasoningRef = useRef<LiveReasoningSummary>({ active: false, text: null });
   const [currentThinkingSteps, setCurrentThinkingSteps] = useState<ThinkingStep[]>([]);
   const [preview, setPreview] = useState<PreviewPanel | null>(null);
   const [showDocSetup, setShowDocSetup] = useState(false);
@@ -203,6 +213,10 @@ function App() {
   const [pdfPanelWidth, setPdfPanelWidth] = useState(576);
   const [isResizingPdf, setIsResizingPdf] = useState(false);
   const [chatSessionId, setChatSessionId] = useState(() => crypto.randomUUID());
+  /** Azure Conversations API id — multi-turn + tool history (preferred). */
+  const [azureConversationId, setAzureConversationId] = useState<string | null>(null);
+  /** Fallback when Conversations API is unavailable. */
+  const [azurePreviousResponseId, setAzurePreviousResponseId] = useState<string | null>(null);
   const [azureAdEmail, setAzureAdEmail] = useState('');
   const [azureAdUserName, setAzureAdUserName] = useState('');
   const [isAzureAdReady, setIsAzureAdReady] = useState(false);
@@ -362,10 +376,15 @@ function App() {
     setStreamAnswerTiming(null);
     setStreamAnswerReasoningEffort(null);
     setStreamHolding(false);
+    setStreamReasoningSummary({ active: false, text: null });
+    setReasoningHistory([]);
+    liveReasoningRef.current = { active: false, text: null };
     setCurrentThinkingSteps([]);
     setPreview(null);
     setInput('');
     setChatSessionId(crypto.randomUUID());
+    setAzureConversationId(null);
+    setAzurePreviousResponseId(null);
   };
 
   const handleAzureAdSignOut = useCallback(() => {
@@ -376,6 +395,8 @@ function App() {
     setStreamedContent('');
     setCurrentThinkingSteps([]);
     setInput('');
+    setAzureConversationId(null);
+    setAzurePreviousResponseId(null);
   }, []);
 
   const searchDocuments = async () => {
@@ -449,15 +470,27 @@ function App() {
     setStreamedContent('');
     setStreamImageUrls([]);
     setStreamAnswerTiming(null);
-    setStreamAnswerReasoningEffort(chatMode === 'fast' ? 'none' : 'low');
+    setStreamAnswerReasoningEffort(chatMode === 'fast' ? 'low' : 'medium');
     setStreamHolding(false);
+    setStreamReasoningSummary({ active: false, text: null });
+    setReasoningHistory([]);
+    liveReasoningRef.current = { active: false, text: null };
     setCurrentThinkingSteps([]);
 
     let fullText = '';
+    let retainedReasoning: Array<{ text: string | null; afterStepIndex?: number }> = [];
     let meta: any = null;
     let latestThinkingSteps: ThinkingStep[] = [];
     let answerReasoningEffort: string | undefined =
-      chatMode === 'fast' ? 'none' : 'low';
+      chatMode === 'fast' ? 'low' : 'medium';
+    let tokenUsage:
+      | {
+          inputTokens: number;
+          outputTokens: number;
+          cachedInputTokens: number;
+          totalTokens: number;
+        }
+      | undefined;
     const requestStartedAt = performance.now();
     let firstTokenMs: number | null = null;
     let modelFirstTokenMs: number | undefined;
@@ -510,6 +543,8 @@ function App() {
           selectedDocuments: docsForSend,
           chatHistory: messages.map((message) => ({ role: message.role, content: message.content })),
           chatSessionId,
+          conversationId: azureConversationId || undefined,
+          previousResponseId: azurePreviousResponseId || undefined,
           userEmail: azureAdEmail,
           mode: chatMode,
         }),
@@ -530,7 +565,7 @@ function App() {
           try {
             readResult = await reader.read();
           } catch (e: any) {
-            if (e?.name === 'AbortError') {
+            if (e?.name === 'AbortError' || controller.signal.aborted) {
               break;
             }
             throw e;
@@ -568,6 +603,24 @@ function App() {
                 answerReasoningEffort = payload.answerReasoningEffort;
                 setStreamAnswerReasoningEffort(payload.answerReasoningEffort);
               }
+              if (
+                payload.tokenUsage &&
+                typeof payload.tokenUsage === 'object' &&
+                typeof payload.tokenUsage.inputTokens === 'number'
+              ) {
+                tokenUsage = {
+                  inputTokens: payload.tokenUsage.inputTokens || 0,
+                  outputTokens: payload.tokenUsage.outputTokens || 0,
+                  cachedInputTokens: payload.tokenUsage.cachedInputTokens || 0,
+                  totalTokens: payload.tokenUsage.totalTokens || 0,
+                };
+              }
+              if (typeof payload.conversationId === 'string' && payload.conversationId.trim()) {
+                setAzureConversationId(payload.conversationId.trim());
+              }
+              if (typeof payload.responseId === 'string' && payload.responseId.trim()) {
+                setAzurePreviousResponseId(payload.responseId.trim());
+              }
               if (Array.isArray(payload.imageUrls)) {
                 setStreamImageUrls(payload.imageUrls);
               }
@@ -590,8 +643,85 @@ function App() {
             if (eventName === 'stream_status' && typeof payload?.holding === 'boolean') {
               setStreamHolding(payload.holding);
             }
+            const reasoningAnchorStepIndex = () => {
+              // Pin to the in-progress agent step when present; else the latest step.
+              for (let i = latestThinkingSteps.length - 1; i >= 0; i--) {
+                const s = latestThinkingSteps[i];
+                if (s.status === 'in_progress' && (s.kind === 'agent' || !s.kind)) {
+                  return i;
+                }
+              }
+              return Math.max(0, latestThinkingSteps.length - 1);
+            };
+
+            const upsertReasoningHistory = (
+              text: string | null,
+              opts?: { startNewPart?: boolean }
+            ) => {
+              // Thinking Process keeps a durable list; never drop prior parts when steps advance.
+              // Anchor to the step that was current when this part started so UI can interleave.
+              if (opts?.startNewPart || retainedReasoning.length === 0) {
+                retainedReasoning = [
+                  ...retainedReasoning,
+                  { text, afterStepIndex: reasoningAnchorStepIndex() },
+                ];
+              } else {
+                const prev = retainedReasoning[retainedReasoning.length - 1];
+                retainedReasoning = [
+                  ...retainedReasoning.slice(0, -1),
+                  { ...prev, text },
+                ];
+              }
+              setReasoningHistory(retainedReasoning.slice());
+            };
+
+            const clearLiveReasoningOnly = () => {
+              // Finalize current live into history, then clear faint main overlay only.
+              const prev = liveReasoningRef.current;
+              if (prev.active) {
+                upsertReasoningHistory(prev.text);
+              }
+              liveReasoningRef.current = { active: false, text: null };
+              setStreamReasoningSummary({ active: false, text: null });
+            };
+
+            if (eventName === 'agent_status' && payload?.status === 'answering') {
+              clearLiveReasoningOnly();
+            }
+            if (eventName === 'reasoning_summary') {
+              if (payload?.active === false) {
+                clearLiveReasoningOnly();
+              } else {
+                const nextText = payload?.text === undefined ? null : payload.text;
+                const prev = liveReasoningRef.current;
+                const startsNewPart =
+                  prev.active &&
+                  (
+                    // Explicit new summary part
+                    nextText === '' ||
+                    // Encrypted-only replaces a prior visible summary
+                    (nextText === null && prev.text !== null) ||
+                    // Wholesale replace (not a growing delta)
+                    (typeof nextText === 'string' &&
+                      nextText.length > 0 &&
+                      typeof prev.text === 'string' &&
+                      prev.text.length > 0 &&
+                      !nextText.startsWith(prev.text) &&
+                      nextText !== prev.text)
+                  );
+
+                const next = { active: true, text: nextText as string | null };
+                liveReasoningRef.current = next;
+                setStreamReasoningSummary(next);
+                upsertReasoningHistory(nextText, { startNewPart: startsNewPart });
+              }
+            }
+            if (eventName === 'tool_start' && payload?.name) {
+              // Steps SSE already mirrors tool logs; keep event for debugging / future UI chips.
+            }
             if ((eventName === 'chunk' || eventName === 'message') && payload?.text) {
               setStreamHolding(false);
+              clearLiveReasoningOnly();
               schedulePaint(String(payload.text));
             }
             if (eventName === 'final' && typeof payload?.text === 'string') {
@@ -625,6 +755,41 @@ function App() {
       flushPaint();
       setStreamHolding(false);
 
+      // Stop during thinking: no assistant bubble (keep user message only).
+      // Stop mid-answer: keep partial text. Always preserve conversation ids from meta if seen.
+      {
+        // Keep Process history; only clear faint live overlay.
+        const prev = liveReasoningRef.current;
+        if (prev.active) {
+          if (
+            retainedReasoning.length === 0 ||
+            retainedReasoning[retainedReasoning.length - 1]?.text !== prev.text
+          ) {
+            let anchor = Math.max(0, latestThinkingSteps.length - 1);
+            for (let i = latestThinkingSteps.length - 1; i >= 0; i--) {
+              const s = latestThinkingSteps[i];
+              if (s.status === 'in_progress' && (s.kind === 'agent' || !s.kind)) {
+                anchor = i;
+                break;
+              }
+            }
+            retainedReasoning = [
+              ...retainedReasoning,
+              { text: prev.text, afterStepIndex: anchor },
+            ];
+          }
+        }
+        liveReasoningRef.current = { active: false, text: null };
+        setStreamReasoningSummary({ active: false, text: null });
+        setReasoningHistory(retainedReasoning.slice());
+      }
+      if (controller.signal.aborted && !fullText.trim()) {
+        setStreamedContent('');
+        setStreamImageUrls([]);
+        setStreamAnswerTiming(null);
+        setStreamAnswerReasoningEffort(null);
+        setCurrentThinkingSteps([]);
+      } else {
       const completeMs = Math.max(0, Math.round(performance.now() - requestStartedAt));
       const answerTiming =
         firstTokenMs !== null
@@ -645,6 +810,7 @@ function App() {
         role: 'assistant',
         content: fullText,
         thinkingSteps: finalThinkingSteps,
+        reasoningSummaries: retainedReasoning.length ? retainedReasoning : undefined,
         thinkingStepsBySource: thinkingSources.reduce<Record<string, ThinkingStep[]>>((acc, source) => {
           acc[source.key] = finalThinkingSteps;
           return acc;
@@ -662,6 +828,7 @@ function App() {
         pdfUrls: meta?.pdfUrls,
         answerTiming,
         answerReasoningEffort,
+        tokenUsage,
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
@@ -670,6 +837,7 @@ function App() {
       setStreamAnswerTiming(null);
       setStreamAnswerReasoningEffort(null);
       setStreamHolding(false);
+      }
     } catch (error: any) {
       if (paintTimer !== null) {
         window.clearTimeout(paintTimer);
@@ -707,6 +875,7 @@ function App() {
               pdfUrls: meta?.pdfUrls,
               answerTiming,
               answerReasoningEffort,
+              tokenUsage,
             },
           ]);
           setStreamedContent('');
@@ -989,7 +1158,22 @@ function App() {
 
                 {isLoading && (
                   <div className="space-y-3">
-                    <ThinkingProcess steps={currentThinkingSteps} live />
+                    <ThinkingProcess
+                      steps={currentThinkingSteps}
+                      live
+                      reasoningHistory={reasoningHistory}
+                      reasoningSummary={streamReasoningSummary}
+                    />
+                    {streamReasoningSummary.active && !streamedContent && (
+                      <div
+                        className="pl-1 pr-2 text-[13px] leading-relaxed text-neutral-400/70 italic whitespace-pre-wrap break-words"
+                        aria-live="polite"
+                      >
+                        {streamReasoningSummary.text === null
+                          ? t('reasoningEncryptedOnly')
+                          : streamReasoningSummary.text || ''}
+                      </div>
+                    )}
                     {streamedContent ? (
                       <ChatMessage
                         message={{
@@ -1295,7 +1479,7 @@ function ChatComposer({
           {modeMenuOpen && (
             <div
               role="listbox"
-              className="absolute top-full right-0 mt-1 w-60 overflow-hidden rounded-xl border border-neutral-200 bg-white py-1 shadow-lg z-30"
+              className="absolute bottom-full right-0 mb-1 w-60 overflow-hidden rounded-xl border border-neutral-200 bg-white py-1 shadow-lg z-50"
             >
               {modeOptions.map((option) => {
                 const selected = option.id === chatMode;

@@ -75,8 +75,12 @@ export function ChatMessage({ message, streaming = false, onOpenPdf, onOpenImage
         <Bot className="h-4 w-4" />
       </div>
       <div className="flex-1 min-w-0 space-y-3">
-        {message.thinkingSteps && message.thinkingSteps.length > 0 && (
-          <ThinkingProcess steps={message.thinkingSteps} />
+        {((message.thinkingSteps && message.thinkingSteps.length > 0) ||
+          (message.reasoningSummaries && message.reasoningSummaries.length > 0)) && (
+          <ThinkingProcess
+            steps={message.thinkingSteps || []}
+            reasoningHistory={message.reasoningSummaries || []}
+          />
         )}
 
         {message.content && (() => {
@@ -213,7 +217,7 @@ export function ChatMessage({ message, streaming = false, onOpenPdf, onOpenImage
           </div>
         )}
 
-        {(message.answerTiming || message.answerReasoningEffort) && (
+        {(message.answerTiming || message.answerReasoningEffort || message.tokenUsage) && (
           <div className="text-[11px] leading-4 text-neutral-400 tabular-nums flex flex-wrap items-center gap-y-0.5">
             {message.answerReasoningEffort && (
               <span>
@@ -252,6 +256,28 @@ export function ChatMessage({ message, streaming = false, onOpenPdf, onOpenImage
                 )}
               </>
             )}
+            {message.tokenUsage && (
+              <>
+                {(message.answerReasoningEffort || message.answerTiming) && (
+                  <span className="mx-1.5 text-neutral-300">·</span>
+                )}
+                <span>
+                  {t('tokenInput')} {formatTokenCount(message.tokenUsage.inputTokens)}
+                </span>
+                <span className="mx-1.5 text-neutral-300">·</span>
+                <span>
+                  {t('tokenOutput')} {formatTokenCount(message.tokenUsage.outputTokens)}
+                </span>
+                <span className="mx-1.5 text-neutral-300">·</span>
+                <span>
+                  {t('tokenCachedInput')} {formatTokenCount(message.tokenUsage.cachedInputTokens)}
+                </span>
+                <span className="mx-1.5 text-neutral-300">·</span>
+                <span>
+                  {t('tokenTotal')} {formatTokenCount(message.tokenUsage.totalTokens)}
+                </span>
+              </>
+            )}
           </div>
         )}
       </div>
@@ -263,4 +289,9 @@ function formatLatency(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) return '—';
   if (ms < 1000) return `${Math.round(ms)}ms`;
   return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function formatTokenCount(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return '—';
+  return Math.round(n).toLocaleString();
 }

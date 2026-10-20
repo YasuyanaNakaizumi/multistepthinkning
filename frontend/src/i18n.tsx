@@ -11,7 +11,7 @@ import {
 export type UiLocale = 'ja' | 'en';
 
 const STORAGE_KEY = 'satori.uiLocale';
-const DEFAULT_UI_LOCALE: UiLocale = 'ja';
+const DEFAULT_UI_LOCALE: UiLocale = 'en';
 
 const messages = {
   ja: {
@@ -50,7 +50,7 @@ const messages = {
     modeThinking: 'Thinking',
     modeThinkingDesc: '多段思考で検索・分類してから回答',
     modeFast: 'Fast',
-    modeFastDesc: 'TOC検索で章を取得してすぐ回答（回答生成は No reasoning）',
+    modeFastDesc: 'TOC検索で章を取得してすぐ回答（reasoning: low）',
     stop: '停止',
     stopTitle: '生成を停止',
     creatingAnswer: '回答を作成しています…',
@@ -60,6 +60,10 @@ const messages = {
     answerComplete: '回答完了',
     modelTtft: 'Model TTFT',
     holdDelay: 'Hold',
+    tokenInput: 'Input',
+    tokenOutput: 'Output',
+    tokenCachedInput: 'Cached input',
+    tokenTotal: 'Total',
     generatingCursor: '生成中',
     assetLinkPreparing: 'リンク準備中…',
     modelType: '機種型式',
@@ -73,7 +77,11 @@ const messages = {
     thinkingDone: '思考完了。回答を作成しています…',
     finishedWithErrors: 'エラーで終了',
     reasoningEffort: 'Reasoning effort',
+    reasoningSummary: '推論サマリ',
+    reasoningEncryptedOnly: 'サマリテキストなし（encrypted output のみ）',
     noReasoning: 'No reasoning',
+    thinkingStages: '{n}段',
+    thinkingSubsteps: '{n}手順',
     uiLanguage: '画面言語',
     zoomOut: '縮小',
     zoomIn: '拡大',
@@ -118,7 +126,7 @@ const messages = {
     modeThinking: 'Thinking',
     modeThinkingDesc: 'Multi-step search and classification before answering',
     modeFast: 'Fast',
-    modeFastDesc: 'TOC search then answer immediately (answer GPT: No reasoning)',
+    modeFastDesc: 'TOC search then answer immediately (reasoning: low)',
     stop: 'Stop',
     stopTitle: 'Stop generation',
     creatingAnswer: 'Creating answer…',
@@ -128,6 +136,10 @@ const messages = {
     answerComplete: 'Answer complete',
     modelTtft: 'Model TTFT',
     holdDelay: 'Hold',
+    tokenInput: 'Input',
+    tokenOutput: 'Output',
+    tokenCachedInput: 'Cached input',
+    tokenTotal: 'Total',
     generatingCursor: 'Generating',
     assetLinkPreparing: 'Preparing link…',
     modelType: 'Model',
@@ -141,7 +153,11 @@ const messages = {
     thinkingDone: 'Thinking done. Creating answer…',
     finishedWithErrors: 'Finished with errors',
     reasoningEffort: 'Reasoning effort',
+    reasoningSummary: 'Reasoning',
+    reasoningEncryptedOnly: 'No summary text (encrypted output only)',
     noReasoning: 'No reasoning',
+    thinkingStages: '{n} stages',
+    thinkingSubsteps: '{n} steps',
     uiLanguage: 'UI language',
     zoomOut: 'Zoom out',
     zoomIn: 'Zoom in',
@@ -172,27 +188,91 @@ function formatMessage(template: string, params?: MessageParams): string {
 }
 
 const STEP_TITLE_JA: Record<string, string> = {
-  'Generating Search Queries + Initial TOC': '検索クエリ生成 + 初期TOC',
-  'Selecting Relevant Paths': '関連パス選択',
-  'Searching by Exact Path Filter': 'パスフィルタ検索',
-  'Judging Answerability': '回答可能性判定',
-  'Extracting Elements + Multi-error': '要素抽出 + 複数エラー',
-  'Detecting Multiple Error Codes': '複数エラーコード検出',
-  'Additional Search': '追加検索',
-  'Chapter Classification': '章分類',
-  'Classifying Answer Pattern(s)': '回答パターン分類',
-  'Preparing Context': 'コンテキスト準備',
-  'Selecting TOC Paths': 'TOCパス選択',
-  'Retrieving Chapter Text': '章テキスト取得',
-  'Fast prep finished': 'Fast準備完了',
-  'Thinking finished': '思考完了',
-  'Calling answer model': '回答モデル呼び出し',
+  'Agent thinking': 'エージェント思考',
+  'Agent answering': 'エージェント回答',
+  'Generating answer': '回答生成',
+  'Tool: select_toc_bookmarks': 'ツール: しおり選定',
+  'Tool: get_toc_bookmarks': 'ツール: しおり一覧取得',
+  'Tool: fetch_chapters_by_paths': 'ツール: 章テキスト取得',
+  // Compat for older session step titles still in chat history
+  'Tool: retrieve_manual_chapters': 'ツール: マニュアル章取得',
+  'Loading TOC': 'しおり読込',
+  'Selecting TOC bookmarks (GPT · initial)': 'しおり選定 (GPT · 初期)',
+  'Selecting TOC bookmarks (GPT · follow-up)': 'しおり選定 (GPT · 追加)',
+  'Fetching chapter text': '章テキスト取得',
+  'Selecting TOC bookmarks (GPT · legacy initial TOC · user query)': 'しおり選定 (GPT · 初期)',
+  'Selecting TOC bookmarks (GPT · legacy selectTOCChapters follow-up)': 'しおり選定 (GPT · 追加)',
+  'Selecting TOC bookmarks (GPT · legacy selectTOCChapters)': 'しおり選定 (GPT · 追加)',
+  'Selecting TOC bookmarks (GPT · legacy initial TOC)': 'しおり選定 (GPT · 初期)',
 };
 
 export function translateStepTitle(title: string, locale: UiLocale): string {
   const normalized = (title || '').replace(/^Step\s*\d+[a-z]?:\s*/i, '');
   if (locale === 'en') return normalized;
-  return STEP_TITLE_JA[normalized] || normalized;
+  if (STEP_TITLE_JA[normalized]) return STEP_TITLE_JA[normalized];
+  // Dynamic tool titles: "Tool: foo_bar"
+  const toolMatch = normalized.match(/^Tool:\s*(.+)$/i);
+  if (toolMatch) {
+    const key = `Tool: ${toolMatch[1]}`;
+    if (STEP_TITLE_JA[key]) return STEP_TITLE_JA[key];
+    return `ツール: ${toolMatch[1]}`;
+  }
+  return normalized;
+}
+
+/** Map English step descriptions (from backend) to Japanese when UI locale is ja. */
+export function translateStepDescription(description: string, locale: UiLocale): string {
+  const text = description || '';
+  if (locale === 'en' || !text) return text;
+
+  const rules: Array<[RegExp, string | ((m: RegExpMatchArray) => string)]> = [
+    [/^Retrieved TOC list \((\d+) entries\)$/i, (m) => `TOC一覧を取得しました（${m[1]}件）`],
+    [/^TOC retrieval failed:\s*(.*)$/i, (m) => `TOC取得失敗: ${m[1]}`],
+    [/^Passed full TOC to main agent \((\d+) entries\)$/i, (m) => `TOC全体をメインエージェントに渡しました（${m[1]}件）`],
+    [/^Selected (\d+) bookmark\(s\)(.*)$/i, (m) => `${m[1]}件のしおりを選定しました${m[2]}`],
+    [/^Could not select bookmarks(.*)$/i, (m) => `しおりを選定できませんでした${m[1]}`],
+    [/^Fetched (\d+) chapter\(s\)(.*)$/i, (m) => `${m[1]}章を取得しました${m[2].replace(' · follow-up', ' · 追加取得').replace(' · truncated', ' · 件数上限で打切り')}`],
+    [/^Could not fetch chapters(.*)$/i, (m) => `章は取得できませんでした${m[1].replace(' · follow-up', ' · 追加取得')}`],
+    [/^Retrieving TOC list…$/i, 'TOC一覧を取得しています…'],
+    [/^Selecting bookmarks…$/i, 'しおりを選定しています…'],
+    [/^Fetching chapter text…$/i, '章テキストを取得しています…'],
+    [/^Running…$/i, '実行中…'],
+    [/^Failed$/i, '失敗'],
+    [/^Done$/i, '完了'],
+    [/^Continuing conversation \(Conversation (.+)\)$/i, (m) => `会話を継続中（Conversation ${m[1]}）`],
+    [/^Continuing conversation \(previous_response_id\)$/i, '会話を継続中（previous_response_id）'],
+    [
+      /^Conversation created \((.+)\)\. Tool turns are stored on the Conversation\.$/i,
+      (m) => `Conversation 作成済み（${m[1]}）。ツール往復も Conversation に記録。`,
+    ],
+    [
+      /^Conversations API unavailable — continuing with previous_response_id\.$/i,
+      'Conversations API 未対応のため previous_response_id で継続。',
+    ],
+    [/^Preparing answer in Fast mode$/i, 'Fast モードで回答準備中'],
+    [/^Preparing answer in Thinking mode$/i, 'Thinking モードで回答準備中'],
+    [/^Final answer generated \(phase: final_answer\)$/i, '最終回答を生成しました（phase: final_answer）'],
+    [/^Turn completed without tools$/i, 'ツールなしでターン完了'],
+    [/^Calling tool:\s*(.+)$/i, (m) => `ツールを呼び出します: ${m[1]}`],
+    [/^Calling (\d+) tools$/i, (m) => `ツールを ${m[1]} 件呼び出します`],
+    [
+      /^Fetched (\d+) chapter\(s\)\. If body text has cross-refs or missing connectors, call fetch_chapters_by_paths again first$/i,
+      (m) =>
+        `取得済み ${m[1]} 章。本文の「〜を参照」や未取得コネクタがあれば、先に fetch_chapters_by_paths を再実行してください`,
+    ],
+    [/^Reviewing tool results…$/i, 'ツール結果を確認中…'],
+    [/^User stopped generation$/i, 'ユーザーが生成を停止しました'],
+    [/^Answer ready$/i, '回答準備完了'],
+    [/^Starting Fast agent…$/i, 'Fast エージェントを開始…'],
+    [/^Starting Thinking agent…$/i, 'Thinking エージェントを開始…'],
+  ];
+
+  for (const [re, repl] of rules) {
+    const m = text.match(re);
+    if (!m) continue;
+    return typeof repl === 'function' ? repl(m) : repl;
+  }
+  return text;
 }
 
 export function formatReasoningEffortLabel(

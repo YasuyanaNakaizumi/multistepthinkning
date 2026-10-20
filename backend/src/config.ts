@@ -62,10 +62,9 @@ export const config = {
   azureOpenAI: {
     endpoint: env(process.env.AZURE_OPENAI_ENDPOINT),
     apiKey: env(process.env.AZURE_OPENAI_API_KEY),
-    apiVersion: env(process.env.AZURE_OPENAI_API_VERSION) || '2025-04-01-preview',
-    deployment: env(process.env.AZURE_OPENAI_DEPLOYMENT)
-      || env(process.env.AZURE_OPENAI_DEPLOYMENT_NAME)
-      || env(process.env.AZURE_OPENAI_DEPLOYMENT_NAME),
+    deployment:
+      env(process.env.AZURE_OPENAI_DEPLOYMENT) ||
+      env(process.env.AZURE_OPENAI_DEPLOYMENT_NAME),
   },
 
   // Azure Foundry / Model Inference (Embeddings)
@@ -73,7 +72,6 @@ export const config = {
     endpoint: env(process.env.AZURE_AI_INFERENCE_ENDPOINT),
     modelName: env(process.env.AZURE_AI_INFERENCE_MODEL_NAME),
     apiKey: env(process.env.AZURE_AI_INFERENCE_API_KEY) || env(process.env.AZURE_OPENAI_API_KEY),
-    // If you use Entra ID auth, set AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_CLIENT_SECRET
     authMode: (process.env.AZURE_AI_INFERENCE_AUTH_MODE || 'api_key') as 'api_key' | 'entra_id',
   },
   

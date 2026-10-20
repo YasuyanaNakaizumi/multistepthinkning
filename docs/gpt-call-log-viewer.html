@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SATORI — GPT Call Log Viewer</title>
+  <style>
+    :root {
+      --ink: #1c1917;
+      --muted: #57534e;
+      --line: #e7e5e4;
+      --canvas: #fafaf9;
+      --blue: #2563eb;
+      --blue-soft: #eff6ff;
+      --card: #fff;
+      --code-bg: #1c1917;
+      --code-fg: #e7e5e4;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Segoe UI", "Hiragino Sans", sans-serif;
+      color: var(--ink);
+      background: var(--canvas);
+      min-height: 100vh;
+    }
+    .top {
+      position: sticky; top: 0; z-index: 10;
+      background: #fff; border-bottom: 1px solid var(--line);
+      padding: 0.85rem 1.25rem;
+      display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center;
+    }
+    .top h1 { margin: 0; font-size: 1.05rem; font-weight: 800; }
+    .top .hint { color: var(--muted); font-size: 0.82rem; margin-right: auto; }
+    .top label.file {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      border: 1px solid var(--blue); color: var(--blue); background: var(--blue-soft);
+      border-radius: 999px; padding: 0.35rem 0.9rem; font-size: 0.82rem; font-weight: 700;
+      cursor: pointer;
+    }
+    .top input[type=file] { display: none; }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 1.25rem; }
+    .empty {
+      border: 2px dashed var(--line); border-radius: 16px; padding: 2.5rem 1.5rem;
+      text-align: center; color: var(--muted); background: #fff;
+    }
+    .meta {
+      background: #fff; border: 1px solid var(--line); border-radius: 14px;
+      padding: 1rem 1.15rem; margin-bottom: 1rem;
+    }
+    .meta h2 { margin: 0 0 0.55rem; font-size: 1.05rem; }
+    .meta dl {
+      display: grid; grid-template-columns: 140px 1fr; gap: 0.35rem 0.75rem;
+      margin: 0; font-size: 0.86rem;
+    }
+    .meta dt { color: var(--muted); font-weight: 650; }
+    .meta dd { margin: 0; word-break: break-word; }
+    .query {
+      margin-top: 0.75rem; padding: 0.7rem 0.85rem; border-radius: 10px;
+      background: #f5f5f4; font-size: 0.9rem; white-space: pre-wrap;
+    }
+    .calls { display: flex; flex-direction: column; gap: 0.85rem; }
+    .call {
+      background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+      overflow: hidden;
+    }
+    .call > summary {
+      list-style: none; cursor: pointer;
+      display: flex; flex-wrap: wrap; gap: 0.45rem 0.75rem; align-items: center;
+      padding: 0.85rem 1rem; font-weight: 700; font-size: 0.92rem;
+      background: linear-gradient(180deg, #fff, #fafaf9);
+    }
+    .call > summary::-webkit-details-marker { display: none; }
+    .badge {
+      font-size: 0.72rem; font-weight: 800; border-radius: 999px;
+      padding: 0.12rem 0.55rem; background: #e2e8f0; color: #334155;
+    }
+    .badge.step { background: #dbeafe; color: #1e40af; }
+    .at { font-size: 0.75rem; font-weight: 500; color: var(--muted); margin-left: auto; }
+    .panels {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 0;
+      border-top: 1px solid var(--line);
+    }
+    @media (max-width: 860px) { .panels { grid-template-columns: 1fr; } }
+    .panel { min-width: 0; }
+    .panel + .panel { border-left: 1px solid var(--line); }
+    @media (max-width: 860px) {
+      .panel + .panel { border-left: none; border-top: 1px solid var(--line); }
+    }
+    .panel h3 {
+      margin: 0; padding: 0.55rem 0.9rem; font-size: 0.78rem; letter-spacing: .04em;
+      text-transform: uppercase; color: var(--muted); background: #f5f5f4;
+      border-bottom: 1px solid var(--line);
+    }
+    .panel pre {
+      margin: 0; padding: 0.85rem 0.95rem;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 0.74rem; line-height: 1.45;
+      white-space: pre-wrap; word-break: break-word;
+      max-height: 420px; overflow: auto;
+      background: var(--code-bg); color: var(--code-fg);
+    }
+    .keys {
+      padding: 0.45rem 0.9rem; font-size: 0.72rem; color: var(--muted);
+      border-top: 1px solid #292524; background: #0c0a09;
+    }
+    .keys code { color: #93c5fd; }
+    .err { color: #b91c1c; margin-top: 0.75rem; font-size: 0.86rem; }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <h1>SATORI · GPT Call Log Viewer</h1>
+    <p class="hint">質問ごとの JSON（<code>logs/gpt-calls/*.json</code>）を開いて、各ステップの request / response フィールドを確認します。</p>
+    <label class="file">
+      JSON を開く
+      <input id="file" type="file" accept="application/json,.json" multiple />
+    </label>
+  </div>
+
+  <div class="wrap">
+    <div id="empty" class="empty">
+      JSON ファイルをドラッグ＆ドロップするか、「JSON を開く」から選択してください。<br />
+      長い文字列は端折られています。フィールド名構造の確認用です。
+    </div>
+    <div id="root"></div>
+    <div id="error" class="err" hidden></div>
+  </div>
+
+  <script>
+    const emptyEl = document.getElementById('empty');
+    const root = document.getElementById('root');
+    const errorEl = document.getElementById('error');
+    const fileInput = document.getElementById('file');
+
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function topKeys(value) {
+      if (!value || typeof value !== 'object') return [];
+      if (Array.isArray(value)) return ['[array]'];
+      return Object.keys(value);
+    }
+
+    /** Shrink tools for display. Step 2+ → names only; step 1 → name + short description. */
+    function compactTools(tools, step) {
+      if (!Array.isArray(tools)) return tools;
+      const aggressive = Number(step) >= 2;
+      return {
+        _compacted: aggressive ? 'tools abbreviated (step≥2: names only)' : 'tools abbreviated (step1: name + short desc)',
+        count: tools.length,
+        tools: tools.map((tool) => {
+          const fn = tool && typeof tool === 'object' ? (tool.function || tool) : null;
+          const name = (fn && fn.name) || tool?.name || tool?.type || '(unnamed)';
+          if (aggressive) return { name: String(name) };
+          const desc = String(fn?.description || tool?.description || '');
+          return {
+            type: tool?.type || 'function',
+            name: String(name),
+            description: desc.length > 80 ? desc.slice(0, 80) + '…' : desc,
+            parameters: fn?.parameters ? '{…}' : undefined,
+          };
+        }),
+      };
+    }
+
+    function prepareRequestForDisplay(request, step) {
+      if (!request || typeof request !== 'object' || Array.isArray(request)) return request;
+      const out = { ...request };
+      if ('tools' in out) out.tools = compactTools(out.tools, step);
+      return out;
+    }
+
+    function panel(title, value) {
+      const keys = topKeys(value);
+      const json = JSON.stringify(value, null, 2);
+      return `
+        <div class="panel">
+          <h3>${escapeHtml(title)}</h3>
+          <pre>${escapeHtml(json)}</pre>
+          ${keys.length ? `<div class="keys">fields: ${keys.map((k) => '<code>' + escapeHtml(k) + '</code>').join(' · ')}</div>` : ''}
+        </div>`;
+    }
+
+    function renderDoc(doc, fileName) {
+      const calls = Array.isArray(doc.calls) ? doc.calls : [];
+      const callsHtml = calls.map((call) => `
+        <details class="call" open>
+          <summary>
+            <span class="badge step">#${escapeHtml(call.step ?? '')}</span>
+            <span>${escapeHtml(call.label || '(no label)')}</span>
+            <span class="at">${escapeHtml(call.at || '')}</span>
+          </summary>
+          <div class="panels">
+            ${panel('request', prepareRequestForDisplay(call.request, call.step))}
+            ${panel('response', call.response)}
+          </div>
+        </details>
+      `).join('');
+
+      return `
+        <section class="meta">
+          <h2>${escapeHtml(fileName || 'GPT call log')}</h2>
+          <dl>
+            <dt>mode</dt><dd>${escapeHtml(doc.mode || '-')}</dd>
+            <dt>startedAt</dt><dd>${escapeHtml(doc.startedAt || '-')}</dd>
+            <dt>finishedAt</dt><dd>${escapeHtml(doc.finishedAt || '-')}</dd>
+            <dt>chatSessionId</dt><dd>${escapeHtml(doc.chatSessionId || '-')}</dd>
+            <dt>conversationId</dt><dd>${escapeHtml(doc.conversationId || '-')}</dd>
+            <dt>calls</dt><dd>${calls.length}</dd>
+            <dt>filePath</dt><dd>${escapeHtml(doc.filePath || '-')}</dd>
+          </dl>
+          <div class="query"><strong>query</strong><br>${escapeHtml(doc.query || '')}</div>
+        </section>
+        <div class="calls">${callsHtml || '<p class="hint">No calls recorded.</p>'}</div>
+      `;
+    }
+
+    async function loadFiles(fileList) {
+      errorEl.hidden = true;
+      errorEl.textContent = '';
+      const files = [...fileList];
+      if (!files.length) return;
+      emptyEl.hidden = true;
+      const parts = [];
+      for (const file of files) {
+        try {
+          const text = await file.text();
+          const doc = JSON.parse(text);
+          parts.push(renderDoc(doc, file.name));
+        } catch (error) {
+          errorEl.hidden = false;
+          errorEl.textContent = `Failed to parse ${file.name}: ${error.message}`;
+        }
+      }
+      root.innerHTML = parts.join('<hr style="border:none;border-top:1px solid #e7e5e4;margin:1.5rem 0" />');
+    }
+
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files) loadFiles(fileInput.files);
+    });
+
+    ['dragenter', 'dragover'].forEach((ev) => {
+      document.body.addEventListener(ev, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      });
+    });
+    document.body.addEventListener('drop', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.dataTransfer?.files?.length) loadFiles(e.dataTransfer.files);
+    });
+  </script>
+</body>
+</html>

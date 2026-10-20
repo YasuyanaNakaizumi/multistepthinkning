@@ -64,40 +64,48 @@ cp .env.example .env
 Edit `.env` with your Azure configuration:
 
 ```env
-# Azure OpenAI Configuration
-AZURE_OPENAI_ENDPOINT=https://your-openai-resource.openai.azure.com/
+# Azure OpenAI / Responses
+AZURE_OPENAI_ENDPOINT=https://your-resource.cognitiveservices.azure.com/openai/responses?api-version=2025-04-01-preview
 AZURE_OPENAI_API_KEY=your-openai-api-key
-AZURE_OPENAI_API_VERSION=2024-02-15-preview
-AZURE_OPENAI_DEPLOYMENT_NAME=gpt-4
+AZURE_OPENAI_DEPLOYMENT_NAME=your-deployment
+# Foundry Conversations + paired Responses (must end with /openai/v1)
+AZURE_OPENAI_CONVERSATIONS_ENDPOINT=https://your-resource.services.ai.azure.com/api/projects/your-project/openai/v1
 
-# Azure AI Search Configuration
+# Embeddings (optional key; falls back to AZURE_OPENAI_API_KEY)
+AZURE_AI_INFERENCE_ENDPOINT=https://your-resource.services.ai.azure.com/models
+AZURE_AI_INFERENCE_MODEL_NAME=cohere-embedding
+
+# Azure AI Search
 AZURE_SEARCH_ENDPOINT=https://your-search-service.search.windows.net
 AZURE_SEARCH_API_KEY=your-search-api-key
 AZURE_SEARCH_INDEX_NAME=your-index-name
+AZURE_SEARCH_INDEX_NAME_OMM=your-omm-index-name
 
-# Azure Blob Storage Configuration
+# Azure Blob Storage
 AZURE_STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=https;AccountName=youraccount;...
 AZURE_STORAGE_CONTAINER_NAME=your-container-name
 
-# Chat Log Blob Storage Configuration
+# Chat Log Blob Storage
 AZURE_CHAT_BLOB_CONNECTION_STRING=DefaultEndpointsProtocol=https;AccountName=yourchataccount;...
 AZURE_CHAT_BLOB_CONTAINER_NAME=your-chat-log-container
 
-# Azure AD / Entra ID Configuration
+# Document Search API
+DOCUMENT_SEARCH_API_URL=https://your-apim.azure-api.net/external/DocumentSearch
+DOCUMENT_SEARCH_SUBSCRIPTION_KEY=your-subscription-key
+
+# Cosmos DB (TOC)
+COSMOS_DB_ENDPOINT=https://your-cosmos.documents.azure.com:443/
+COSMOS_DB_KEY=your-cosmos-key
+COSMOS_DB_DATABASE=aibot
+COSMOS_DB_CONTAINER=master-data
+
+# Azure AD / Entra ID
 AZURE_AD_CLIENT_ID=your-azure-ad-client-id
 AZURE_AD_TENANT_ID=your-azure-ad-tenant-id
 AZURE_AD_REDIRECT_URI=http://localhost:3000
 AZURE_AD_CERT_THUMBPRINT=your-cert-thumbprint
-
-# Application Configuration
-PORT=3001
-NODE_ENV=development
-
-# TOC Directory Path
-TOC_DIR=./md_out_toc
-
-# Documents JSON Path
-DOCUMENTS_JSON_PATH=./documents.json
+AZURE_AD_CERT_PUBLIC_PATH=certificate.crt
+AZURE_AD_CERT_PRIVATE_KEY_PATH=private_key.pem
 ```
 
 ### 4. Prepare Data Files
@@ -228,41 +236,39 @@ az containerapp create \
 ## API Endpoints
 
 ### POST `/api/chat`
-Process a chat request with multi-step reasoning.
+Non-streaming chat (runs the Response Agent end-to-end). Prefer `/api/chat/stream` for the UI.
 
 **Request Body:**
 ```json
 {
   "query": "Your question here",
-  "selectedPdfs": ["All Documents"],
-  "chatHistory": []
+  "selectedPdfs": ["SEN06867-01"],
+  "selectedDocuments": [],
+  "chatHistory": [],
+  "mode": "thinking",
+  "chatSessionId": "optional-session-id",
+  "conversationId": "optional-azure-conversation-id"
 }
 ```
 
 **Response:**
 ```json
 {
-  "answer": "",
-  "thinkingSteps": [
-    {
-      "title": "Step 1: Generating Search Queries",
-      "description": "...",
-      "status": "completed",
-      "timestamp": "2024-01-01T00:00:00.000Z"
-    }
-  ],
+  "answer": "...",
+  "thinkingSteps": [],
   "imageUrls": [],
   "pdfUrls": [],
-  "followupQuestions": []
+  "conversationId": "conv_...",
+  "responseId": "resp_..."
 }
 ```
 
 ### POST `/api/chat/stream`
-Stream the final answer with SAS link replacement.
+SSE stream: thinking steps, tool events, answer chunks, then final meta (`conversationId`, assets, token usage).
 
 **Request Body:** Same as `/api/chat`
 
-**Response:** Streaming text with SAS URLs inserted
+**Response:** Server-Sent Events (`steps`, `chunk`, `meta`, `final`, `done`)
 
 ### GET `/api/documents`
 Get the document catalog.
@@ -288,26 +294,24 @@ Health check endpoint.
 }
 ```
 
-## Multi-Step Reasoning Flow
+## Response Agent Flow
 
-The application implements a 6-step reasoning process:
+Chat uses a single Responses API agent (`runResponseAgent`):
 
-1. **Search Query Generation**: Extract search queries and identifiers from user input
-2. **TOC Chapter Selection**: Select relevant chapters from table of contents
-3. **TOC Filter Search**: Search Azure AI Search using TOC filters
-4. **Answerability Judgment**: Determine if results can answer the query
-5. **Element Extraction**: Extract error codes, connectors, references, and components
-6. **Final Answer Generation**: Generate comprehensive answer with streaming
+1. **Select TOC** via `select_toc_bookmarks` (inner GPT picks paths; TOC cached for the turn)
+2. **Fetch chapters** via `fetch_chapters_by_paths` (host loads text/images; no TOC GPT)
+3. **Optional 2nd select+fetch** (Thinking mode) when MAIN bodies need cross-refs / connectors / related fault codes
+4. **Answer** from the same agent (no separate final-answer model), with `[[PDF:shop-N]]` / `[[IMG:]]` expanded to SAS links
+5. **Conversation continuity** via Azure Conversations API + Blob-stored citation maps
 
-Each step is displayed in the collapsible thinking process panel, showing status and details.
+Fast mode: one select+fetch then answer. Thinking mode: up to two fetches.
 
 ## SAS Link Insertion
 
-The application automatically handles SAS link insertion during streaming:
+During answer streaming the host expands:
 
-- **Image Links**: When `[----]` pattern is detected, it's replaced with appropriate image SAS URLs
-- **TOC PDF Links**: `[shop-N]` references are replaced with `[Title](SAS_URL)` markdown links
-- **Real-time Replacement**: Links are inserted during streaming for immediate display
+- **`[[IMG:filename]]`** → image SAS markdown
+- **`[[PDF:shop-N]]`** → `[Title](<SAS_URL>)` markdown links
 
 ## Troubleshooting
 

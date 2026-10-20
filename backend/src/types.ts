@@ -62,60 +62,16 @@ export interface SelectedDocument {
   modelSerialAssociation?: ModelSerialAssociation[];
 }
 
-// GPT response types
-export interface SearchQueriesResponse {
-  queries: string[];
-  has_codes: boolean;
-}
-
-/** Combined Step 1+2: search queries and initial TOC path selection. */
+/** Inner GPT: search queries + initial TOC path selection. */
 export interface InitialQueryAndTocResponse {
   queries: string[];
   has_codes: boolean;
   chapters: string[];
 }
 
+/** Inner GPT: follow-up TOC path selection. */
 export interface TOCChaptersResponse {
   chapters: string[];
-}
-
-export interface AnswerabilityResponse {
-  answerable: boolean;
-  reason: string;
-}
-
-export type AnswerPattern = 'single_fault' | 'assembly' | 'multi_fault' | 'maintenance' | 'general';
-
-export interface AnswerPatternResponse {
-  patterns: AnswerPattern[];
-  reason: string;
-}
-
-export interface ExtractedElements {
-  error_codes: string[];
-  connectors: string[];
-  reference_chapters: string[];
-  diagnostic_chapters: string[];
-  components: string[];
-  reasoning: string;
-  needs_followup: boolean;
-  /** Combined with former detectMultiErrorCodes step. */
-  is_multi_error_codes?: boolean;
-  multi_error_codes?: string[];
-  multi_error_reason?: string;
-}
-
-export interface ChapterClassification {
-  main: number[];
-  connector: number[];
-  sub: number[];
-  ignore: number[];
-}
-
-export interface ClassifiedResults {
-  main: SearchResult[];
-  connector: SearchResult[];
-  sub: SearchResult[];
 }
 
 export interface ThinkingStep {
@@ -126,6 +82,10 @@ export interface ThinkingStep {
   error?: string;
   /** Present when this step calls GPT (e.g. none / low / medium / high). */
   reasoningEffort?: string;
+  /** UI grouping: tool parent vs nested detail vs agent/answer. */
+  kind?: 'agent' | 'tool' | 'detail' | 'answer';
+  /** Shared id so detail steps nest under their tool call. */
+  groupId?: string;
 }
 
 export interface ChatMessage {
@@ -136,47 +96,26 @@ export interface ChatMessage {
   pdfUrls?: { title: string; url: string }[];
 }
 
-export interface MultiStepReasoningRequest {
+/** POST /api/chat and /api/chat/stream body. */
+export interface ChatRequest {
   query: string;
-  /** Legacy list of document numbers. */
+  /** Document numbers (compat with older clients). */
   selectedPdfs?: string[];
   /** Full document metadata from DocumentSearch. */
   selectedDocuments?: SelectedDocument[];
-  /** Client-generated chat session id used for Blob logging. */
   chatSessionId?: string;
-  /** Logged-in user's email for chat log storage. */
   userEmail?: string;
-  /**
-   * Chat speed mode.
-   * - thinking: full multi-step pipeline (default)
-   * - fast: TOC select → retrieve chapter text → answer
-   */
+  /** thinking = up to 2 retrieves; fast = 1 retrieve. */
   mode?: 'thinking' | 'fast';
   chatHistory: ChatMessage[];
+  conversationId?: string;
+  previousResponseId?: string;
 }
 
-export interface MultiStepReasoningResponse {
+export interface ChatResponse {
   answer: string;
   thinkingSteps: ThinkingStep[];
   imageUrls: string[];
   pdfUrls: { title: string; url: string }[];
-  followupQuestions: string[];
-}
-
-export interface ImageExplanation {
-  caption: string;
-  ocr_text: string;
-  label_list: string[];
-  md_anchor_quotes: string[];
-  procedure_step_number: string;
-  page_number: number;
-  cropped_image_path: string;
-}
-
-export interface ChapterRef {
-  ref_id: string;
-  title: string;
-  result: SearchResult;
-  is_main: boolean;
-  is_connector: boolean;
+  followupQuestions?: string[];
 }
