@@ -113,6 +113,24 @@ export const config = {
     container: env(process.env.COSMOS_DB_CONTAINER) || 'master-data',
   },
 
+  // SQIS PostgreSQL (TSI / Service News hybrid search)
+  sqis: {
+    connectionString: env(process.env.PG_CONN_STR),
+    host: env(process.env.PG_HOST),
+    port: env(process.env.PG_PORT) || '5432',
+    database: env(process.env.PG_DB_NAME),
+    user: env(process.env.PG_USER),
+    password: env(process.env.PG_PASSWORD),
+    sslMode: env(process.env.PG_SSLMODE) || 'require',
+    searchFunctionTsi:
+      env(process.env.PG_SEARCH_FUNCTION_TSI) || env(process.env.PG_SEARCH_FUNCTION),
+    searchFunctionServiceNews:
+      env(process.env.PG_SEARCH_FUNCTION_SERVICE_NEWS) ||
+      env(process.env.PG_SEARCH_FUNCTION),
+    lang: env(process.env.SQIS_LANG) || 'English',
+    userType: env(process.env.SQIS_USER_TYPE) || 'maincompany',
+  },
+
   // Application
   port: parseInt(process.env.PORT || '3001', 10),
   nodeEnv: process.env.NODE_ENV || 'development',

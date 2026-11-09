@@ -541,6 +541,8 @@ function App() {
         body: JSON.stringify({
           query: queryText,
           selectedDocuments: docsForSend,
+          model: model.trim() || undefined,
+          serial: serial.trim() || undefined,
           chatHistory: messages.map((message) => ({ role: message.role, content: message.content })),
           chatSessionId,
           conversationId: azureConversationId || undefined,

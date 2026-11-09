@@ -99,6 +99,20 @@ COSMOS_DB_KEY=your-cosmos-key
 COSMOS_DB_DATABASE=aibot
 COSMOS_DB_CONTAINER=master-data
 
+# SQIS PostgreSQL (TSI / Service News agent tools; optional)
+# Either PG_CONN_STR or PG_HOST + PG_DB_NAME + PG_USER
+# PG_CONN_STR=postgresql://user:pass@host:5432/dbname?sslmode=require
+# PG_HOST=
+# PG_PORT=5432
+# PG_DB_NAME=
+# PG_USER=
+# PG_PASSWORD=
+# PG_SSLMODE=require
+# PG_SEARCH_FUNCTION_TSI=fn_tsi_search_jsonb
+# PG_SEARCH_FUNCTION_SERVICE_NEWS=fn_service_news_search_jsonb
+# SQIS_LANG=English
+# SQIS_USER_TYPE=maincompany
+
 # Azure AD / Entra ID
 AZURE_AD_CLIENT_ID=your-azure-ad-client-id
 AZURE_AD_TENANT_ID=your-azure-ad-tenant-id

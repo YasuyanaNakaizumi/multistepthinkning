@@ -9,6 +9,13 @@ import {
 } from './cosmosToc';
 import { loadTOCMarkdown, flattenImageExplanations } from './tocLoader';
 import { SearchedChapterRef, CHAT_REASONING_EFFORT } from './openai';
+import {
+  hybridSearchServiceNews,
+  hybridSearchTsi,
+  isSqisConfigured,
+  summarizeServiceNewsHits,
+  summarizeTsiHits,
+} from './sqisSearch';
 
 export type AgentMode = 'thinking' | 'fast';
 
@@ -19,6 +26,8 @@ export interface AgentToolContext {
   chatHistory: Array<{ role: string; content: string }>;
   /** Latest user message for this turn (may not yet be in chatHistory). */
   currentQuery?: string;
+  /** Machine model for SQIS TSI / Service News filtering (trunk model). */
+  trunkModel?: string | null;
   assetStore: AgentAssetStore;
   chapterCap: number;
   contentCharCap: number;
@@ -314,7 +323,7 @@ async function searchPathsForDocs(
   return merged;
 }
 
-export const AGENT_TOOL_DEFINITIONS = [
+const MANUAL_TOOL_DEFINITIONS = [
   {
     type: 'function' as const,
     name: 'get_toc_bookmarks',
@@ -362,6 +371,71 @@ export const AGENT_TOOL_DEFINITIONS = [
     },
   },
 ];
+
+const SQIS_TOOL_DEFINITIONS = [
+  {
+    type: 'function' as const,
+    name: 'search_tsi',
+    description:
+      'Search SQIS Technical Service Information (TSI) via hybrid (keyword + vector) search. Use when the user asks about TSI, field quality issues, known problems, countermeasures, or service bulletins that may not be in the selected shop/OMM manuals. Prefer a concise search query (symptoms, fault code, part name). By default results are restricted to the current machine model.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Search query for TSI (symptoms, fault code, part, topic).',
+        },
+        size: {
+          type: 'integer',
+          description: 'Max hits to return (1–15). Default 6.',
+        },
+        restrict_to_model: {
+          type: 'boolean',
+          description:
+            'If true (default), filter by the current trunk/machine model. Set false only when intentionally searching across models.',
+        },
+      },
+      additionalProperties: false,
+      required: ['query'],
+    },
+  },
+  {
+    type: 'function' as const,
+    name: 'search_service_news',
+    description:
+      'Search SQIS Service News via hybrid (keyword + vector) search. Use when the user asks about service news, announcements, campaigns, or published service communications. Prefer a concise search query. By default results are restricted to the current machine model.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Search query for Service News.',
+        },
+        size: {
+          type: 'integer',
+          description: 'Max hits to return (1–15). Default 6.',
+        },
+        restrict_to_model: {
+          type: 'boolean',
+          description:
+            'If true (default), filter by the current trunk/machine model. Set false only when intentionally searching across models.',
+        },
+      },
+      additionalProperties: false,
+      required: ['query'],
+    },
+  },
+];
+
+/** Tool schemas exposed to the Responses API (manual TOC + optional SQIS). */
+export function getAgentToolDefinitions() {
+  return isSqisConfigured()
+    ? [...MANUAL_TOOL_DEFINITIONS, ...SQIS_TOOL_DEFINITIONS]
+    : [...MANUAL_TOOL_DEFINITIONS];
+}
+
+/** @deprecated Prefer getAgentToolDefinitions() so SQIS tools stay conditional. */
+export const AGENT_TOOL_DEFINITIONS = MANUAL_TOOL_DEFINITIONS;
 
 function resolveDocNumbers(raw: unknown, ctx: AgentToolContext): string[] {
   const fromArg = Array.isArray(raw)
@@ -907,6 +981,116 @@ async function fetchChaptersByPaths(args: any, ctx: AgentToolContext) {
   };
 }
 
+function clampInt(value: unknown, fallback: number, min: number, max: number): number {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(n)));
+}
+
+async function toolSearchTsi(args: any, ctx: AgentToolContext) {
+  if (!isSqisConfigured()) {
+    return { ok: false, error: 'SQIS (PostgreSQL) is not configured.' };
+  }
+  if (ctx.signal?.aborted) {
+    return { ok: false, cancelled: true, error: 'User stopped generation' };
+  }
+  const query = String(args?.query || '').trim();
+  if (!query) return { ok: false, error: 'query is required' };
+  const size = clampInt(args?.size, 6, 1, 15);
+  const restrict = args?.restrict_to_model !== false;
+  const model = restrict ? ctx.trunkModel || null : null;
+
+  ctx.onProgress?.({
+    title: 'Searching TSI (SQIS)',
+    description: `query: ${query}${model ? `\nmodel: ${model}` : '\nmodel: (all)'}`,
+    status: 'in_progress',
+  });
+
+  try {
+    const r = await hybridSearchTsi({
+      query,
+      model,
+      size,
+      lang: config.sqis.lang,
+    });
+    const hits = summarizeTsiHits(r.data, size);
+    ctx.onProgress?.({
+      title: 'Searching TSI (SQIS)',
+      description: `Found ${r.totalCount} hit(s); returning ${hits.length}`,
+      status: 'completed',
+    });
+    return {
+      ok: true,
+      query,
+      restricted_to_model: model,
+      total_count: r.totalCount,
+      hits,
+      citeHint:
+        'Use TSI hit titles/numbers/snippets as evidence. Do not invent TSI IDs. Prefer citing number + title in prose; include url when present.',
+    };
+  } catch (error) {
+    const message = (error as Error).message || 'TSI search failed';
+    ctx.onProgress?.({
+      title: 'Searching TSI (SQIS)',
+      description: message,
+      status: 'error',
+    });
+    return { ok: false, error: message };
+  }
+}
+
+async function toolSearchServiceNews(args: any, ctx: AgentToolContext) {
+  if (!isSqisConfigured()) {
+    return { ok: false, error: 'SQIS (PostgreSQL) is not configured.' };
+  }
+  if (ctx.signal?.aborted) {
+    return { ok: false, cancelled: true, error: 'User stopped generation' };
+  }
+  const query = String(args?.query || '').trim();
+  if (!query) return { ok: false, error: 'query is required' };
+  const size = clampInt(args?.size, 6, 1, 15);
+  const restrict = args?.restrict_to_model !== false;
+  const model = restrict ? ctx.trunkModel || null : null;
+
+  ctx.onProgress?.({
+    title: 'Searching Service News (SQIS)',
+    description: `query: ${query}${model ? `\nmodel: ${model}` : '\nmodel: (all)'}`,
+    status: 'in_progress',
+  });
+
+  try {
+    const r = await hybridSearchServiceNews({
+      query,
+      model,
+      size,
+      userType: config.sqis.userType,
+    });
+    const hits = summarizeServiceNewsHits(r.data, size);
+    ctx.onProgress?.({
+      title: 'Searching Service News (SQIS)',
+      description: `Found ${r.totalCount} hit(s); returning ${hits.length}`,
+      status: 'completed',
+    });
+    return {
+      ok: true,
+      query,
+      restricted_to_model: model,
+      total_count: r.totalCount,
+      hits,
+      citeHint:
+        'Use Service News titles/numbers/snippets as evidence. Do not invent news IDs. Prefer citing number + title in prose; include url when present.',
+    };
+  } catch (error) {
+    const message = (error as Error).message || 'Service News search failed';
+    ctx.onProgress?.({
+      title: 'Searching Service News (SQIS)',
+      description: message,
+      status: 'error',
+    });
+    return { ok: false, error: message };
+  }
+}
+
 function formatChapterLabel(opts: {
   documentNumber?: string;
   title?: string;
@@ -1007,6 +1191,26 @@ export async function executeAgentTool(
       const result = await fetchChaptersByPaths(args, ctx);
       return { result, summary: summarizeFetchedChapters(result) };
     }
+    case 'search_tsi': {
+      const result = await toolSearchTsi(args, ctx);
+      const hits = Array.isArray((result as any)?.hits) ? (result as any).hits.length : 0;
+      return {
+        result,
+        summary: (result as any)?.ok
+          ? `TSI search: ${hits} hit(s) (total ${(result as any).total_count ?? 0})`
+          : `TSI search failed: ${(result as any)?.error || 'unknown'}`,
+      };
+    }
+    case 'search_service_news': {
+      const result = await toolSearchServiceNews(args, ctx);
+      const hits = Array.isArray((result as any)?.hits) ? (result as any).hits.length : 0;
+      return {
+        result,
+        summary: (result as any)?.ok
+          ? `Service News search: ${hits} hit(s) (total ${(result as any).total_count ?? 0})`
+          : `Service News search failed: ${(result as any)?.error || 'unknown'}`,
+      };
+    }
     default:
       return {
         result: { ok: false, error: `Unknown tool: ${name}` },
@@ -1052,6 +1256,14 @@ export function summarizeToolArgs(name: string, rawArgs: string): string {
         parts.push('paths: (reuse last select)');
       }
       if (typeof args.followUp === 'boolean') parts.push(`followUp: ${args.followUp}`);
+      return parts.join('\n');
+    }
+    if (name === 'search_tsi' || name === 'search_service_news') {
+      const parts = [`query: ${String(args.query || '').trim() || '(empty)'}`];
+      if (args.size != null) parts.push(`size: ${args.size}`);
+      if (typeof args.restrict_to_model === 'boolean') {
+        parts.push(`restrict_to_model: ${args.restrict_to_model}`);
+      }
       return parts.join('\n');
     }
   } catch {

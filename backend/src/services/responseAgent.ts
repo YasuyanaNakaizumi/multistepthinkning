@@ -1,13 +1,14 @@
 import { config } from '../config';
 import { ThinkingStep, SelectedDocument, ChatMessage } from '../types';
 import {
-  AGENT_TOOL_DEFINITIONS,
+  getAgentToolDefinitions,
   AgentAssetStore,
   AgentMode,
   AgentToolContext,
   executeAgentTool,
   summarizeToolArgs,
 } from './agentTools';
+import { isSqisConfigured } from './sqisSearch';
 import {
   CHAT_REASONING_EFFORT,
   FAST_REASONING_EFFORT,
@@ -210,16 +211,36 @@ CONNECTOR SECTION (when fault diagnosis and connector IDs appear in the target M
 Related components: When fetched chapter bodies name related components / sensors / controllers, also output "## Related Component Information" after the connector section, listing each with location/mounting info. Cite the source PDF at most once for the section. Do not invent.`;
 }
 
-function buildSystemPrompt(mode: AgentMode, documentLabels: string[]): string {
+function buildSqisToolGuidance(sqisEnabled: boolean, trunkModel?: string | null): string {
+  if (!sqisEnabled) return '';
+  const modelLine = trunkModel
+    ? `Current machine model for SQIS filters: ${trunkModel}.`
+    : 'No machine model was provided; SQIS tools may search without a model filter unless the user names one.';
+  return `
+SQIS tools (TSI / Service News):
+- ${modelLine}
+- Call search_tsi when the question involves Technical Service Information, known field issues, countermeasures, quality bulletins, or TSI numbers.
+- Call search_service_news when the question involves Service News, campaigns, announcements, or published service communications.
+- You MAY call SQIS tools together with manual TOC tools when both sources help. Prefer manuals for procedure steps; prefer SQIS for field issues / announcements not covered by manuals.
+- Keep SQIS queries short and specific (fault code, symptom, part, topic). Leave restrict_to_model true unless cross-model search is clearly needed.
+- Cite SQIS hits by number/title (and url when provided). Do not invent TSI/news IDs.`;
+}
+
+function buildSystemPrompt(
+  mode: AgentMode,
+  documentLabels: string[],
+  opts?: { sqisEnabled?: boolean; trunkModel?: string | null }
+): string {
   const docs = documentLabels.length ? documentLabels.join(', ') : '(selected manuals)';
+  const sqisEnabled = Boolean(opts?.sqisEnabled);
   const modeBlock = mode === 'fast'
     ? `MODE: Fast
-- Use tools when the current question needs manual evidence that is not already available.
+- Use tools when the current question needs manual or SQIS evidence that is not already available.
 - If a complete TOC is already available in this conversation (prior get_toc_bookmarks result still present), do NOT call get_toc_bookmarks again — call fetch_chapters_by_paths directly with exact paths from that TOC. Call get_toc_bookmarks only when no usable TOC is available yet (first turn or new manuals).
 - Prefer focused paths. Do not seek additional material unless it is necessary and the mode allows it.
 - tool_choice is auto; the host does not force a tool.`
     : `MODE: Thinking
-- Use tools when the current question needs manual evidence that is not already available.
+- Use tools when the current question needs manual or SQIS evidence that is not already available.
 - If a complete TOC is already available in this conversation (prior get_toc_bookmarks result still present), do NOT call get_toc_bookmarks again — call fetch_chapters_by_paths directly with exact paths from that TOC. Call get_toc_bookmarks only when no usable TOC is available yet (first turn or new manuals).
 - After EVERY first fetch, you MUST read the fetched chapter body text (context/contents) and decide whether a second fetch is required BEFORE writing the final answer. Do not answer yet if a second fetch is required.
 - MUST call fetch_chapters_by_paths again (reuse the already-loaded TOC; pick new exact paths) when the fetched MAIN body text contains any of the following that are not already covered by fetched chapters:
@@ -239,7 +260,7 @@ That is the primary goal. Decide whether tools are needed based on the evidence 
 Selected manuals: ${docs}
 
 Decision for retrieval:
-- Retrieve when the current question cannot be answered accurately from the current conversation's relevant evidence, or when the user explicitly asks to look up/check the manual.
+- Retrieve when the current question cannot be answered accurately from the current conversation's relevant evidence, or when the user explicitly asks to look up/check the manual, TSI, or Service News.
 - Reuse prior evidence for clarification, summary, or a narrow fact when it directly covers the current question.
 - A topic change usually requires new chapter evidence via fetch_chapters_by_paths, but do NOT re-call get_toc_bookmarks when a usable TOC is already in this conversation — reuse that TOC and fetch new paths.
 - Do not retrieve if the user is only making a conversational remark that needs no manual facts.
@@ -247,10 +268,12 @@ Decision for retrieval:
 - Never use a brief mention, an unrelated chapter, or generic memory as a substitute for evidence.
 
 Pipeline:
-1) Call get_toc_bookmarks only when no usable TOC is already available in this conversation.
+1) Call get_toc_bookmarks only when no usable TOC is already available in this conversation and manuals are needed.
 2) Call fetch_chapters_by_paths with exact relevant tree paths from the (prior or just-loaded) TOC.
 3) Thinking only: if the fetched body text references another section or needs connector/layout evidence not yet fetched, call fetch_chapters_by_paths again with those exact new paths before answering.
-4) You write the final answer from those results in the SAME turn/agent (no separate answer model or answer-only follow-up). When ready to reply to the user, emit the user-facing message as the final answer (phase final_answer), not commentary.
+4) When TSI / Service News evidence is relevant, call search_tsi and/or search_service_news (available only when SQIS is configured).
+5) You write the final answer from those results in the SAME turn/agent (no separate answer model or answer-only follow-up). When ready to reply to the user, emit the user-facing message as the final answer (phase final_answer), not commentary.
+${buildSqisToolGuidance(sqisEnabled, opts?.trunkModel)}
 
 Conversation continuity: reuse relevant prior evidence and prior TOC when still available, but do not let a previous topic, template, or answer format determine the response to a new question.
 
@@ -281,6 +304,18 @@ function shortToolResultSummary(name: string, result: unknown, ok: boolean, fall
     const trunc = r?.truncated ? ' · truncated' : '';
     return n > 0 ? `Fetched ${n} chapter(s)${follow}${trunc}` : `Could not fetch chapters${follow}`;
   }
+  if (name === 'search_tsi') {
+    const r = result as { total_count?: number; hits?: unknown[] } | null;
+    const n = Array.isArray(r?.hits) ? r!.hits!.length : 0;
+    return n > 0 ? `TSI: ${n} hit(s) (total ${Number(r?.total_count || 0)})` : 'TSI: no hits';
+  }
+  if (name === 'search_service_news') {
+    const r = result as { total_count?: number; hits?: unknown[] } | null;
+    const n = Array.isArray(r?.hits) ? r!.hits!.length : 0;
+    return n > 0
+      ? `Service News: ${n} hit(s) (total ${Number(r?.total_count || 0)})`
+      : 'Service News: no hits';
+  }
   return fallback || 'Done';
 }
 
@@ -302,7 +337,29 @@ function shortToolStartSummary(name: string, argsSummary: string): string {
       .find((l) => l.startsWith('paths:'));
     return p || 'Fetching chapter text…';
   }
+  if (name === 'search_tsi') {
+    return argsSummary || 'Searching TSI…';
+  }
+  if (name === 'search_service_news') {
+    return argsSummary || 'Searching Service News…';
+  }
   return argsSummary || 'Running…';
+}
+
+function resolveTrunkModel(
+  explicitModel: string | undefined,
+  selectedDocuments: SelectedDocument[]
+): string | null {
+  const fromArg = String(explicitModel || '').trim();
+  if (fromArg) return fromArg;
+  for (const doc of selectedDocuments || []) {
+    const assoc = doc.modelSerialAssociation || [];
+    for (const row of assoc) {
+      const model = String(row?.model || '').trim();
+      if (model) return model;
+    }
+  }
+  return null;
 }
 
 function pushStep(steps: ThinkingStep[], step: ThinkingStep, onSteps?: (s: ThinkingStep[]) => void) {
@@ -827,8 +884,9 @@ async function streamResponsesTurn(
 
   // Prefer streamed summary for UI; fall back to completed output items.
   let reasoningSummary = currentSummary.trim();
-  if (!reasoningSummary && completedOutput) {
-    for (const item of completedOutput) {
+  const completedOutputItems: any[] = Array.isArray(completedOutput) ? completedOutput : [];
+  if (!reasoningSummary && completedOutputItems.length) {
+    for (const item of completedOutputItems) {
       if (String(item?.type || '') !== 'reasoning') continue;
       const text = summaryTextFromReasoningItem(item);
       if (text) {
@@ -839,8 +897,7 @@ async function streamResponsesTurn(
   }
   const hadReasoningItem =
     [...items.values()].some((m) => m.type === 'reasoning') ||
-    (Array.isArray(completedOutput) &&
-      completedOutput.some((item) => String(item?.type || '') === 'reasoning'));
+    completedOutputItems.some((item) => String(item?.type || '') === 'reasoning');
 
   // Log the vendor-facing raw Responses object (long strings clipped in gptCallLog).
   const rawForLog =
@@ -897,6 +954,8 @@ export async function runResponseAgent(options: {
   selectedDocuments: SelectedDocument[];
   selectedDocumentNumbers: string[];
   chatHistory: ChatMessage[];
+  /** Machine model for SQIS TSI / Service News filtering. */
+  model?: string;
   /** Azure Conversations API id from the previous user turn. */
   conversationId?: string;
   /** Client chat session id — used to persist conversationId JSON in Blob. */
@@ -926,6 +985,9 @@ export async function runResponseAgent(options: {
   const steps: ThinkingStep[] = [];
   const hooks = options.hooks || {};
   let activeToolGroupId: string | undefined;
+  const sqisEnabled = isSqisConfigured();
+  const agentTools = getAgentToolDefinitions();
+  const trunkModel = resolveTrunkModel(options.model, options.selectedDocuments);
 
   const toolCtx: AgentToolContext = {
     mode,
@@ -933,6 +995,7 @@ export async function runResponseAgent(options: {
     selectedDocumentNumbers: options.selectedDocumentNumbers,
     chatHistory: slimHistory(options.chatHistory),
     currentQuery: options.query,
+    trunkModel,
     assetStore,
     chapterCap: mode === 'fast' ? 12 : 16,
     contentCharCap: mode === 'fast' ? 6000 : 20000,
@@ -1005,7 +1068,10 @@ export async function runResponseAgent(options: {
   });
 
   const buildFreshInput = (): ResponseInputItem[] => [
-    messageItem('system', buildSystemPrompt(mode, documentLabels)),
+    messageItem(
+      'system',
+      buildSystemPrompt(mode, documentLabels, { sqisEnabled, trunkModel })
+    ),
     ...history.map((m) => messageItem(m.role, m.content)),
     messageItem('user', options.query),
   ];
@@ -1017,9 +1083,13 @@ export async function runResponseAgent(options: {
         'Follow-up in the same Conversation (Conversations API + Responses).',
         `Selected manuals: ${documentLabels.length ? documentLabels.join(', ') : '(selected manuals)'}.`,
         `Mode: ${mode}.`,
+        trunkModel ? `Machine model: ${trunkModel}.` : null,
         'Main instruction: Handle the user\'s request appropriately（ユーザーの要望に適切に対処しなさい）.',
         'Use prior tool results when they directly answer the current question. Do not let the previous topic or answer format determine this answer.',
         'If current evidence is insufficient or the user asks to check the manual: call fetch_chapters_by_paths with exact paths. If a complete TOC from a prior get_toc_bookmarks is still available in this conversation, reuse it and do NOT call get_toc_bookmarks again. Call get_toc_bookmarks only when no usable TOC is present (first turn or new manuals).',
+        sqisEnabled
+          ? 'If the question needs TSI or Service News, call search_tsi / search_service_news (model-restricted by default).'
+          : null,
         'A topic change often needs new chapter evidence, but reuse the existing TOC when available. Do not retrieve for a conversational remark that needs no manual facts.',
         'After a fetch in Thinking mode, you MUST inspect the fetched chapter body text. If it names another section/chapter to refer to, or contains connector IDs without connector list/layout already fetched, call fetch_chapters_by_paths again with those exact paths before answering. Do not answer from memory for those gaps.',
         'Do not use a brief mention, unrelated chapter, or generic memory as a substitute for evidence. Decide based on whether new chapter text materially improves accuracy. tool_choice is auto; the host does not force tools.',
@@ -1031,7 +1101,9 @@ export async function runResponseAgent(options: {
         'When you retrieve new chapters, prefer their PDF_CITATION_TOKEN values. Answer from the available evidence at the detail level requested; do not assume the user has already seen the relevant steps.',
         '',
         options.query,
-      ].join('\n')
+      ]
+        .filter(Boolean)
+        .join('\n')
     ),
   ];
 
@@ -1231,7 +1303,7 @@ export async function runResponseAgent(options: {
     try {
       const settleBody: Record<string, unknown> = {
         model,
-        tools: AGENT_TOOL_DEFINITIONS,
+        tools: agentTools,
         tool_choice: 'none',
         store: true,
         stream: false,
@@ -1323,7 +1395,7 @@ export async function runResponseAgent(options: {
     // (no separate answer call / answer prompt).
     const body: Record<string, unknown> = {
       model,
-      tools: AGENT_TOOL_DEFINITIONS,
+      tools: agentTools,
       tool_choice: 'auto',
       reasoning: buildReasoningConfig(toolEffort),
       store: true,
