@@ -103,6 +103,10 @@ export interface ChatRequest {
   selectedPdfs?: string[];
   /** Full document metadata from DocumentSearch. */
   selectedDocuments?: SelectedDocument[];
+  /** Machine model used for DocumentSearch / SQIS model filter. */
+  model?: string;
+  /** Serial number from the document search UI (optional context). */
+  serial?: string;
   chatSessionId?: string;
   userEmail?: string;
   /** thinking = up to 2 retrieves; fast = 1 retrieve. */
